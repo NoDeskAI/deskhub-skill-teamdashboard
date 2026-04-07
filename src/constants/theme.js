@@ -48,6 +48,16 @@ export const DESK = {
   stackY: 18,
 };
 
+// FullPanel — Container Transform 动画壳（第三层）
+export const PANEL = {
+  zIndex: 700,
+  bg: "#fff",
+  radius: 20,
+  shadow: "0 20px 60px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.08)",
+  overlay: "rgba(0,0,0,0.3)",
+  transition: "all 0.5s cubic-bezier(0.4, 0, 0.2, 1)",
+};
+
 // Browse page — 锚定 CardBrowse
 export const BROWSE = {
   backRadius: 10,
