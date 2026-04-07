@@ -12,7 +12,7 @@ import { avgScore } from "../../utils/helpers.js";
  * 工单桌面行 — 复用 useDeskRow + DeskRowShell
  * 第二层：DetailModal 显示方案排名概览
  */
-export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect, onViewAll, onExpandFull }) {
+export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect, onViewAll, onExpandFull, fullPanelOpen }) {
   const sorted = [...wos].sort((a, b) => b.created.localeCompare(a.created));
   const dr = useDeskRow(sorted, wo => wo.id);
   const detailRef = useRef(null);
@@ -20,13 +20,12 @@ export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect
   const totalVariants = wos.reduce((a, wo) => a + wo.variants.length, 0);
   const highCount = wos.filter(wo => wo.priority === "high").length;
 
-  // 展开详情时直接过渡 — 从弹窗位置无缝膨胀为第三层，不回收卡片
+  // 展开详情时直接过渡 — 不清焦点，卡片保持 detail 阶段等关闭时飞回
   const handleExpandFull = (wo) => {
     const rect = detailRef.current?.getBoundingClientRect();
     if (onExpandFull) {
-      onExpandFull(wo, rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height } : null);
-      // 静默清理焦点状态（不触发回收动画）
-      setTimeout(() => dr.clearFocusSilent(), 100);
+      // 传递 rect 和卡片飞回回调给父级
+      onExpandFull(wo, rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height } : null, dr.handleDetailClose);
     }
   };
 
@@ -72,7 +71,7 @@ export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect
           />
         ))}
 
-        renderDetail={() => dr.focusItem && dr.focusPhase === "detail" && (
+        renderDetail={() => dr.focusItem && dr.focusPhase === "detail" && !fullPanelOpen && (
           <WoDetailPopup
             ref={detailRef}
             wo={dr.focusItem}

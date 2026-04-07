@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { Settings2, Flame, ScrollText, BadgeCheck } from "lucide-react";
 import { INIT_DIMS } from "../../constants/mock-data.js";
 import { PLAN_PHASE, PLAN_RESULT } from "../../constants/status.js";
@@ -69,17 +69,29 @@ export default function WorkBench({ plans, setPlans, role }) {
     return groups;
   }, [done]);
 
-  // 展开 FullPanel（接收可选的 originRect 参数）
-  const handleExpandFull = useCallback((wo, rect) => {
+  // 卡片飞回回调 — FullPanel 关闭后触发卡片收回动画
+  const cardReturnRef = useRef(null);
+
+  // 展开 FullPanel（接收 originRect 和卡片飞回回调）
+  const handleExpandFull = useCallback((wo, rect, cardReturnFn) => {
     const latest = plans.find(p => p.id === wo.id) || wo;
     setFullWo(latest);
     setFullOriginRect(rect || { top: window.innerHeight / 2 - 100, left: window.innerWidth / 2 - 180, width: 360, height: 200 });
+    cardReturnRef.current = cardReturnFn || null;
     setTimeout(() => setShowFull(true), 50);
   }, [plans]);
 
   const handleCloseFull = useCallback(() => {
     setShowFull(false);
-    setTimeout(() => { setFullWo(null); setFullOriginRect(null); }, 500);
+    // FullPanel 收缩动画 500ms → 触发卡片飞回动画
+    setTimeout(() => {
+      setFullWo(null);
+      setFullOriginRect(null);
+      if (cardReturnRef.current) {
+        cardReturnRef.current(); // condense → fly-back
+        cardReturnRef.current = null;
+      }
+    }, 450);
   }, []);
 
   // 表单操作
@@ -203,6 +215,7 @@ export default function WorkBench({ plans, setPlans, role }) {
                 onSelect={handleExpandFull}
                 onViewAll={() => setBrowseSection("active")}
                 onExpandFull={handleExpandFull}
+                fullPanelOpen={showFull}
               />
             )
           )}
@@ -221,6 +234,7 @@ export default function WorkBench({ plans, setPlans, role }) {
                 onSelect={handleExpandFull}
                 onViewAll={() => setBrowseSection("next")}
                 onExpandFull={handleExpandFull}
+                fullPanelOpen={showFull}
               />
             )
           )}
@@ -239,6 +253,7 @@ export default function WorkBench({ plans, setPlans, role }) {
                 onSelect={handleExpandFull}
                 onViewAll={() => setBrowseSection("done")}
                 onExpandFull={handleExpandFull}
+                fullPanelOpen={showFull}
               />
             )
           )}
