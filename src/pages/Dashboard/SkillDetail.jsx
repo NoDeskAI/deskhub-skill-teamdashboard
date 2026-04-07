@@ -41,16 +41,27 @@ export default function SkillDetail({ sk, onClose, show }) {
         {sk.desc}
       </div>
 
-      {/* 核心数据 — 有趋势判断 */}
+      {/* 核心数据 */}
       <div style={{ padding: "12px 18px", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
-        <div style={{ display: "flex", gap: 12 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <DataCard label="总下载" value={sk.dl} />
           <DataCard label="总查看" value={sk.views} />
-          {weekDl !== null && (
-            <DataCard label="本周下载" value={weekDl} trend={trendDir} />
-          )}
+          {weekDl !== null && <DataCard label="周下载" value={weekDl} trend={trendDir} />}
         </div>
       </div>
+
+      {/* 运营指标 */}
+      {(sk.successRate || sk.userRating) && (
+        <div style={{ padding: "12px 18px", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {sk.successRate != null && <DataCard label="成功率" value={sk.successRate + "%"} warn={sk.successRate < 90} />}
+            {sk.avgResponseTime != null && <DataCard label="响应" value={sk.avgResponseTime + "s"} warn={sk.avgResponseTime > 5} />}
+            {sk.userRating != null && <DataCard label="评分" value={sk.userRating + "/5"} />}
+            {sk.weeklyActiveUsers != null && <DataCard label="周活" value={sk.weeklyActiveUsers} />}
+            {sk.searchHits != null && <DataCard label="搜索" value={sk.searchHits} />}
+          </div>
+        </div>
+      )}
 
       {/* 下载趋势迷你图 */}
       {sk.dlTrend && (
@@ -104,15 +115,18 @@ export default function SkillDetail({ sk, onClose, show }) {
 }
 
 /** 数据指标小卡片 */
-function DataCard({ label, value, trend }) {
+function DataCard({ label, value, trend, warn }) {
   return (
-    <div style={{ flex: 1, background: "rgba(0,0,0,0.03)", borderRadius: 8, padding: "8px 10px" }}>
+    <div style={{
+      flex: 1, minWidth: 60, borderRadius: 8, padding: "8px 10px",
+      background: warn ? "rgba(184,58,42,0.06)" : "rgba(0,0,0,0.03)",
+    }}>
       <div style={{ fontFamily: FONT_SANS, fontSize: 10, color: "#a09888", marginBottom: 3 }}>{label}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        <span style={{ fontFamily: FONT_MONO, fontSize: 16, color: "#3a2a18", fontWeight: 500 }}>{value}</span>
-        {trend === "up" && <TrendingUp size={13} color="#4a8a4a" />}
-        {trend === "down" && <TrendingDown size={13} color="#b83a2a" />}
-        {trend === "flat" && <Minus size={13} color="#a09888" />}
+        <span style={{ fontFamily: FONT_MONO, fontSize: 15, color: warn ? "#b83a2a" : "#3a2a18", fontWeight: 500 }}>{value}</span>
+        {trend === "up" && <TrendingUp size={12} color="#4a8a4a" />}
+        {trend === "down" && <TrendingDown size={12} color="#b83a2a" />}
+        {trend === "flat" && <Minus size={12} color="#a09888" />}
       </div>
     </div>
   );
