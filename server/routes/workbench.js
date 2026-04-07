@@ -7,8 +7,9 @@ import db from '../db/init.js';
 import { wrapResponse } from '../utils/meta.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const UPLOAD_DIR = process.env.UPLOAD_DIR || join(__dirname, '..', 'uploads');
 const upload = multer({
-  dest: join(__dirname, '..', 'uploads', 'eval'),
+  dest: join(UPLOAD_DIR, 'eval'),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
@@ -373,7 +374,7 @@ router.post('/upload', upload.single('file'), (req, res) => {
 
 // --- GET /api/uploads/* --- 静态文件服务
 import expressModule from 'express';
-router.use('/uploads', expressModule.static(join(__dirname, '..', 'uploads')));
+router.use('/uploads', expressModule.static(UPLOAD_DIR));
 
 // ============================================================
 //  工具函数

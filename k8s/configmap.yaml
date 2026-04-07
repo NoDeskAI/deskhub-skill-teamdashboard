@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: teamboard-config
+  namespace: teamboard
+data:
+  NODE_ENV: "production"
+  PORT: "3001"
+  DESKHUB_BASE: "http://skillshub-server.skillshub.svc:4000"
+  UMAMI_BASE: "http://skillshub-umami.skillshub.svc:3000"
+  UMAMI_WEBSITE_ID: "149fb71c-b439-4594-88fc-b222b169780e"
+  MCP_ENDPOINT: ""
+  DB_DIR: "/data/db"
+  UPLOAD_DIR: "/data/uploads"

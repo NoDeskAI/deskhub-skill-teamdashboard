@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teamboard
+  namespace: teamboard
+  labels:
+    app: teamboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: teamboard
+  template:
+    metadata:
+      labels:
+        app: teamboard
+    spec:
+      containers:
+        - name: teamboard
+          image: nodesk-center-cn-beijing.cr.volces.com/infra/teamboard:20260407211907
+          ports:
+            - containerPort: 3001
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: teamboard-config
+          env:
+            - name: UMAMI_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: teamboard-secret
+                  key: UMAMI_USERNAME
+            - name: UMAMI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: teamboard-secret
+                  key: UMAMI_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: teamboard-data

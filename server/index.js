@@ -6,7 +6,7 @@ import workbenchRoutes from './routes/workbench.js';
 import mcpProxy from './routes/mcp.js';
 
 // 读 .env（简易方式，不引入 dotenv）
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,6 +34,14 @@ app.use('/api/proxy/mcp', mcpProxy);
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
+
+const distPath = join(__dirname, '..', 'dist');
+if (process.env.NODE_ENV === 'production' && existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('{*path}', (_req, res) => {
+    res.sendFile(join(distPath, 'index.html'));
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`[server] DeskSkill API running on http://localhost:${PORT}`);
