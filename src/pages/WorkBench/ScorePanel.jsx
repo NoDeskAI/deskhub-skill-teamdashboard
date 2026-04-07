@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { X, Upload } from "lucide-react";
+import { X, Upload, FileText } from "lucide-react";
 import { FONT_MONO, FONT_SANS } from "../../constants/theme.js";
 import StarRate from "../../components/ui/StarRate.jsx";
 import { FInput } from "../../components/ui/Form.jsx";
@@ -7,12 +7,12 @@ import { td } from "../../utils/helpers.js";
 
 /**
  * 评测打分面板 — 测试员专用，z-index 800 弹窗
- * 选方案 → 手动打分(十分制) 或 上传评测文档 → 提交
+ * 选方案 → 上传评测文档（可选）→ 打分 → 提交
  */
 export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) {
+  const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
   const [selVarId, setSelVarId] = useState(null);
-  const [scoreMode, setScoreMode] = useState("manual"); // "manual" | "upload"
   const [scores, setScores] = useState({});
   const [tester, setTester] = useState("");
   const [comment, setComment] = useState("");
@@ -22,18 +22,20 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
   const activeDims = (dims || []).filter(d => d.active);
 
   useEffect(() => {
-    if (show) requestAnimationFrame(() => setVisible(true));
-    else setVisible(false);
+    if (show) {
+      setMounted(true);
+      requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
+    } else if (mounted) {
+      setVisible(false);
+      const t = setTimeout(() => setMounted(false), 400);
+      return () => clearTimeout(t);
+    }
   }, [show]);
 
-  if (!show && !visible) return null;
+  if (!mounted) return null;
   if (!wo) return null;
 
-  const allFilled = selVarId && tester.trim() && (
-    scoreMode === "manual"
-      ? activeDims.every(d => scores[d.id] > 0)
-      : fileName
-  );
+  const allFilled = selVarId && tester.trim() && activeDims.every(d => scores[d.id] > 0);
 
   const handleSubmit = () => {
     if (!allFilled) return;
@@ -46,7 +48,6 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
       ...(fileName ? { evalDoc: fileName } : {}),
     }));
     onSubmitScores(wo.id, selVarId, scoreEntries);
-    // 重置
     setScores({});
     setTester("");
     setComment("");
@@ -54,13 +55,10 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
     setSelVarId(null);
   };
 
-  const handleFileChange = (e) => {
-    const f = e.target.files?.[0];
-    if (f) setFileName(f.name);
-  };
+  const handleClose = () => onClose();
 
   return (
-    <div onClick={onClose} style={{
+    <div onClick={handleClose} style={{
       position: "fixed", inset: 0, zIndex: 800,
       background: "rgba(0,0,0,0.35)", backdropFilter: "blur(3px)",
       display: "flex", alignItems: "center", justifyContent: "center",
@@ -83,11 +81,10 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
           flexShrink: 0,
         }}>
           <div style={{ fontFamily: FONT_SANS, fontSize: 16, fontWeight: 600, color: "#3a2a18" }}>评测打分</div>
-          <div onClick={onClose} style={{
+          <div onClick={handleClose} style={{
             width: 28, height: 28, borderRadius: 7,
             display: "flex", alignItems: "center", justifyContent: "center",
-            cursor: "pointer", background: "rgba(0,0,0,0.04)",
-            transition: "background 0.15s",
+            cursor: "pointer", background: "rgba(0,0,0,0.04)", transition: "background 0.15s",
           }}
             onMouseEnter={e => e.currentTarget.style.background = "rgba(0,0,0,0.08)"}
             onMouseLeave={e => e.currentTarget.style.background = "rgba(0,0,0,0.04)"}
@@ -118,80 +115,50 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
             )}
           </div>
 
-          {/* 模式切换 */}
+          {/* 上传评测文档（可选） */}
           <div style={{ marginBottom: 16 }}>
-            <div style={{ display: "flex", gap: 0, borderRadius: 8, overflow: "hidden", border: "1px solid rgba(0,0,0,0.08)" }}>
-              {[
-                { id: "manual", label: "手动打分" },
-                { id: "upload", label: "上传评测文档" },
-              ].map(m => (
-                <div key={m.id} onClick={() => setScoreMode(m.id)} style={{
-                  flex: 1, padding: "8px", textAlign: "center", cursor: "pointer",
-                  fontFamily: FONT_SANS, fontSize: 13, fontWeight: 500,
-                  background: scoreMode === m.id ? "#2d2418" : "transparent",
-                  color: scoreMode === m.id ? "#f5f0e8" : "#8a7a62",
-                  transition: "all 0.2s",
-                }}>
-                  {m.label}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 手动打分 */}
-          {scoreMode === "manual" && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 10 }}>逐项评分</div>
-              {activeDims.map(d => (
-                <div key={d.id} style={{
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                  marginBottom: 10,
-                }}>
-                  <span style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#4a4540" }}>{d.name}</span>
-                  <StarRate value={scores[d.id] || 0} max={d.max} onChange={val => setScores(prev => ({ ...prev, [d.id]: val }))} />
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* 上传评测文档 */}
-          {scoreMode === "upload" && (
-            <div style={{ marginBottom: 16 }}>
-              <input ref={fileRef} type="file" style={{ display: "none" }} onChange={handleFileChange} />
+            <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 8 }}>评测文档 <span style={{ color: "#b5a898", fontWeight: 400 }}>（选填）</span></div>
+            <input ref={fileRef} type="file" style={{ display: "none" }} onChange={e => { const f = e.target.files?.[0]; if (f) setFileName(f.name); }} />
+            {fileName ? (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "8px 12px", borderRadius: 8,
+                background: "rgba(45,36,24,0.04)", border: "1px solid rgba(0,0,0,0.06)",
+              }}>
+                <FileText size={14} color="#5a7a9a" />
+                <span style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#3a2a18", flex: 1 }}>{fileName}</span>
+                <span onClick={() => setFileName(null)} style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#b83a2a", cursor: "pointer" }}>移除</span>
+              </div>
+            ) : (
               <div
                 onClick={() => fileRef.current?.click()}
                 style={{
-                  border: "2px dashed rgba(0,0,0,0.12)", borderRadius: 10,
-                  padding: "24px", textAlign: "center", cursor: "pointer",
-                  background: fileName ? "rgba(45,36,24,0.04)" : "rgba(0,0,0,0.02)",
-                  transition: "all 0.15s",
+                  border: "1px dashed rgba(0,0,0,0.12)", borderRadius: 8,
+                  padding: "14px", textAlign: "center", cursor: "pointer",
+                  transition: "border-color 0.15s",
                 }}
                 onMouseEnter={e => e.currentTarget.style.borderColor = "rgba(0,0,0,0.25)"}
                 onMouseLeave={e => e.currentTarget.style.borderColor = "rgba(0,0,0,0.12)"}
               >
-                <Upload size={24} color="#a09888" style={{ marginBottom: 8 }} />
-                {fileName ? (
-                  <div style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#3a2a18", fontWeight: 500 }}>{fileName}</div>
-                ) : (
-                  <div style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#a09888" }}>点击选择评测文档</div>
-                )}
+                <Upload size={18} color="#a09888" style={{ marginBottom: 4 }} />
+                <div style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#a09888" }}>点击上传评测文档</div>
               </div>
+            )}
+          </div>
 
-              {/* 上传模式也需要手动打分 */}
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 10 }}>综合评分</div>
-                {activeDims.map(d => (
-                  <div key={d.id} style={{
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                    marginBottom: 10,
-                  }}>
-                    <span style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#4a4540" }}>{d.name}</span>
-                    <StarRate value={scores[d.id] || 0} max={d.max} onChange={val => setScores(prev => ({ ...prev, [d.id]: val }))} />
-                  </div>
-                ))}
+          {/* 逐项评分 */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 10 }}>逐项评分</div>
+            {activeDims.map(d => (
+              <div key={d.id} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                marginBottom: 10,
+              }}>
+                <span style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#4a4540" }}>{d.name}</span>
+                <StarRate value={scores[d.id] || 0} max={d.max} onChange={val => setScores(prev => ({ ...prev, [d.id]: val }))} />
               </div>
-            </div>
-          )}
+            ))}
+          </div>
 
           {/* 测试人 + 评语 */}
           <div style={{ marginBottom: 8 }}>

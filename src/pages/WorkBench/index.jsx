@@ -27,6 +27,7 @@ export default function WorkBench({ plans, setPlans, role }) {
   const [dims, setDims] = useState(INIT_DIMS);
   const [fMode, setFMode] = useState(null);
   const [fData, setFData] = useState({});
+  const [showForm, setShowForm] = useState(false);
   const [browseSection, setBrowseSection] = useState(null);
   const [showDimMgr, setShowDimMgr] = useState(false);
   const [newDim, setNewDim] = useState("");
@@ -126,21 +127,20 @@ export default function WorkBench({ plans, setPlans, role }) {
   };
 
   // 表单操作
-  const openCreate = () => {
-    setFMode("create");
-    setFData({ name: "", type: typeFilter, status: "next", priority: "medium", desc: "" });
+  const openForm = (mode, data) => { setFMode(mode); setFData(data); setShowForm(true); };
+  const closeForm = () => {
+    setShowForm(false);
+    setTimeout(() => { setFMode(null); setFData({}); }, 400);
   };
-  const openAddVar = (wo) => {
-    setFMode("addVar");
-    setFData({ planId: wo.id, name: "", uploader: "", desc: "", link: "" });
-  };
+
+  const openCreate = () => openForm("create", { name: "", type: typeFilter, status: "next", priority: "medium", desc: "" });
+  const openAddVar = (wo) => openForm("addVar", { planId: wo.id, name: "", uploader: "", desc: "", link: "" });
   const openMarkComplete = (wo) => {
-    // 自动选中评分最高的方案，但管理员可以改
     const activeDimsLocal = dims.filter(d => d.active);
-    const ranked = [...wo.variants].map(v => ({ ...v, avg: avgScore(v, activeDimsLocal) })).sort((a, b) => b.avg - a.avg);
+    const vars = wo?.variants || [];
+    const ranked = vars.map(v => ({ id: v.id, name: v.name, uploader: v.uploader, uploaded: v.uploaded, avg: avgScore(v, activeDimsLocal) })).sort((a, b) => b.avg - a.avg);
     const topVariant = ranked.find(v => v.avg > 0);
-    setFMode("complete");
-    setFData({ planId: wo.id, result: "adopted", selectedVariantId: topVariant?.id || null, variants: ranked });
+    openForm("complete", { planId: wo.id, result: "adopted", selectedVariantId: topVariant?.id || null, variants: ranked });
   };
 
   const save = () => {
@@ -148,7 +148,6 @@ export default function WorkBench({ plans, setPlans, role }) {
       ops.addPlan(fData);
     } else if (fMode === "addVar" && fData.planId) {
       ops.addVariant(fData.planId, fData);
-      // 刷新 fullWo
       if (fullWo && fullWo.id === fData.planId) {
         setTimeout(() => {
           const latest = plans.find(p => p.id === fData.planId);
@@ -159,7 +158,7 @@ export default function WorkBench({ plans, setPlans, role }) {
       ops.completePlan(fData.planId, fData.result);
       handleCloseFull();
     }
-    setFMode(null);
+    closeForm();
   };
 
   // 维度管理
@@ -182,7 +181,7 @@ export default function WorkBench({ plans, setPlans, role }) {
           onOpenScorePanel={openScorePanel} onOpenDocReader={openDocReader} />
         {formUI()}
         {docReaderData && <DocReader show={showDocReader} onClose={closeDocReader} title={docReaderData.title} content={docReaderData.content} />}
-        {showScorePanel && fullWo && <ScorePanel show={true} onClose={closeScorePanel} wo={fullWo} dims={dims} onSubmitScores={handleScoreSubmit} />}
+        {fullWo && <ScorePanel show={showScorePanel} onClose={closeScorePanel} wo={fullWo} dims={dims} onSubmitScores={handleScoreSubmit} />}
       </>
     );
   }
@@ -193,11 +192,12 @@ export default function WorkBench({ plans, setPlans, role }) {
     const titles = { create: "新建工单", addVar: "添加方案", complete: "定稿" };
 
     return (
-      <div onClick={() => setFMode(null)} style={{
+      <div onClick={closeForm} style={{
         position: "fixed", inset: 0, zIndex: 800,
         background: "rgba(0,0,0,0.35)", backdropFilter: "blur(3px)",
         display: "flex", alignItems: "center", justifyContent: "center",
-        opacity: 1, transition: "opacity 0.3s",
+        opacity: showForm ? 1 : 0, transition: "opacity 0.3s",
+        pointerEvents: showForm ? "auto" : "none",
       }}>
         <div onClick={e => e.stopPropagation()} style={{
           width: fMode === "complete" ? 400 : 380,
@@ -205,7 +205,7 @@ export default function WorkBench({ plans, setPlans, role }) {
           border: "1px solid rgba(0,0,0,0.1)", borderRadius: 16,
           boxShadow: "0 2px 4px rgba(0,0,0,0.04), 0 8px 20px rgba(0,0,0,0.08), 0 24px 48px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.8)",
           overflow: "hidden",
-          transform: "scale(1) translateY(0)",
+          transform: showForm ? "scale(1) translateY(0)" : "scale(0.88) translateY(24px)",
           transition: "transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)",
         }}>
           {/* 标题栏 */}
@@ -289,7 +289,7 @@ export default function WorkBench({ plans, setPlans, role }) {
 
           {/* 底部按钮 */}
           <div style={{ padding: "0 20px 16px", display: "flex", gap: 10 }}>
-            <button onClick={() => setFMode(null)} style={{
+            <button onClick={closeForm} style={{
               flex: 1, padding: "10px", borderRadius: 8, cursor: "pointer",
               fontFamily: FONT_SANS, fontSize: 14, fontWeight: 500,
               background: "rgba(0,0,0,0.04)", color: "#5a5550",
@@ -409,7 +409,7 @@ export default function WorkBench({ plans, setPlans, role }) {
 
       {/* DocReader + ScorePanel */}
       {docReaderData && <DocReader show={showDocReader} onClose={closeDocReader} title={docReaderData.title} content={docReaderData.content} />}
-      {showScorePanel && fullWo && <ScorePanel show={true} onClose={closeScorePanel} wo={fullWo} dims={dims} onSubmitScores={handleScoreSubmit} />}
+      {fullWo && <ScorePanel show={showScorePanel} onClose={closeScorePanel} wo={fullWo} dims={dims} onSubmitScores={handleScoreSubmit} />}
 
       {/* 维度管理 */}
       {showDimMgr && (
