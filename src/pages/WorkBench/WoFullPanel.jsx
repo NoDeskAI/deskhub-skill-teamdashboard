@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Plus, FileText } from "lucide-react";
+import { Plus, FileText, Activity } from "lucide-react";
 import Markdown from "react-markdown";
 import { FONT_MONO, FONT_SANS } from "../../constants/theme.js";
 import { PRI } from "../../constants/priority.js";
 import { PLAN_ST } from "../../constants/status.js";
+import { SKILLS } from "../../constants/mock-data.js";
 import { avgScore } from "../../utils/helpers.js";
 import FullPanel from "../../components/ui/FullPanel.jsx";
 import Accordion from "../../components/ui/Accordion.jsx";
@@ -168,6 +169,9 @@ export default function WoFullPanel({ wo, dims, show, originRect, onClose, role,
         )}
       </div>
 
+      {/* 关联技能运营数据 */}
+      <LinkedSkillStats woName={wo.name} />
+
       {/* 对比表 */}
       <div style={{ marginBottom: 8 }}>
         <div style={{ fontFamily: FONT_MONO, fontSize: 13, color: "#5a5550", marginBottom: 8 }}>方案对比</div>
@@ -216,6 +220,48 @@ const previewMdComponents = {
   table: () => null, // 预览中隐藏表格
   code: ({ children }) => <code style={{ fontFamily: FONT_MONO, fontSize: 10, background: "rgba(0,0,0,0.04)", padding: "0 3px", borderRadius: 2 }}>{children}</code>,
 };
+
+/** 关联技能运营数据 — 通过工单名称模糊匹配 SKILLS */
+function LinkedSkillStats({ woName }) {
+  // 简单匹配：工单名包含技能名，或技能名包含工单关键词
+  const sk = SKILLS.find(s =>
+    s.relatedPlanId || woName.includes(s.name) || s.name.split(/\s+/).some(w => w.length > 1 && woName.includes(w))
+  );
+  if (!sk || (!sk.successRate && !sk.userRating)) return null;
+
+  const weekDl = sk.dlTrend ? sk.dlTrend.reduce((a, b) => a + b, 0) : null;
+
+  return (
+    <div style={{
+      marginBottom: 14, padding: "10px 12px", borderRadius: 10,
+      background: "rgba(0,0,0,0.02)", border: "1px solid rgba(0,0,0,0.05)",
+    }}>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 11, color: "#7a6a55", marginBottom: 8, display: "flex", alignItems: "center", gap: 4 }}>
+        <Activity size={11} />关联技能：{sk.name} ({sk.ver})
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {sk.successRate != null && <MiniStat label="成功率" value={sk.successRate + "%"} warn={sk.successRate < 90} />}
+        {sk.avgResponseTime != null && <MiniStat label="响应" value={sk.avgResponseTime + "s"} warn={sk.avgResponseTime > 5} />}
+        {sk.userRating != null && <MiniStat label="评分" value={sk.userRating + "/5"} />}
+        {sk.weeklyActiveUsers != null && <MiniStat label="周活" value={sk.weeklyActiveUsers} />}
+        {weekDl != null && <MiniStat label="周下载" value={weekDl} />}
+        {sk.searchHits != null && <MiniStat label="搜索" value={sk.searchHits} />}
+      </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, warn }) {
+  return (
+    <div style={{
+      padding: "4px 8px", borderRadius: 6, minWidth: 52,
+      background: warn ? "rgba(184,58,42,0.06)" : "rgba(0,0,0,0.03)",
+    }}>
+      <div style={{ fontFamily: FONT_SANS, fontSize: 9, color: "#a09888", marginBottom: 1 }}>{label}</div>
+      <div style={{ fontFamily: FONT_MONO, fontSize: 13, color: warn ? "#b83a2a" : "#3a2a18", fontWeight: 500 }}>{value}</div>
+    </div>
+  );
+}
 
 /** 按测试员+日期分组评分记录 */
 function groupScoresByTester(scores, activeDims) {
