@@ -9,6 +9,7 @@ import TrendChart from "./charts/TrendChart.jsx";
 import DownloadRank from "./charts/DownloadRank.jsx";
 import SceneDistribution from "./charts/SceneDistribution.jsx";
 import HotSearch from "./charts/HotSearch.jsx";
+import { rankByPopularity, rankByActivity } from "./skillRank.js";
 
 const CHART_TABS = [
   { id: "trend", label: "迭代趋势", content: <TrendChart /> },
@@ -16,6 +17,10 @@ const CHART_TABS = [
   { id: "scene", label: "分布概况", content: <SceneDistribution /> },
   { id: "search", label: "热门搜索", content: <HotSearch /> },
 ];
+
+// 加权排序后取 Top 7
+const popular = rankByPopularity(SKILLS).slice(0, 7);
+const active = rankByActivity(SKILLS).slice(0, 7);
 
 export default function Dashboard() {
   const [selSk, setSelSk] = useState(null);
@@ -25,12 +30,13 @@ export default function Dashboard() {
   const handleSel = useCallback(sk => { setSelSk(sk); setTimeout(() => setShowDet(true), 30); }, []);
   const handleCloseDet = useCallback(() => { setShowDet(false); setTimeout(() => setSelSk(null), 350); }, []);
 
-  // 两组：进行中 = iterating + testing + planned，已完成 = stable
-  const active = SKILLS.filter(sk => sk.status !== "stable");
-  const done = SKILLS.filter(sk => sk.status === "stable");
+  const activeCount = SKILLS.filter(sk => sk.status !== "stable").length;
+  const doneCount = SKILLS.filter(sk => sk.status === "stable").length;
 
   if (browseGroup) {
-    const skills = browseGroup === "active" ? active : done;
+    const skills = browseGroup === "popular"
+      ? rankByPopularity(SKILLS)
+      : rankByActivity(SKILLS);
     return (
       <div style={{ paddingTop: 16 }}>
         <CardBrowse
@@ -49,8 +55,8 @@ export default function Dashboard() {
       {/* 指标栏 */}
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <Stat label="技能总数" value={SKILLS.length} color="#6a5a42" />
-        <Stat label="进行中" value={active.length} color="#b85c1a" />
-        <Stat label="已完成" value={done.length} color="#4a7a4a" />
+        <Stat label="进行中" value={activeCount} color="#b85c1a" />
+        <Stat label="已完成" value={doneCount} color="#4a7a4a" />
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <Stat label="总下载" value={SKILLS.reduce((a, b) => a + b.dl, 0)} color="#6a5a42" />
@@ -59,16 +65,25 @@ export default function Dashboard() {
         <Stat label="UV (本周)" value="3.2k" color="#5a7a5a" />
       </div>
 
-      {/* 数据洞察 — 图表轮播 */}
-      <ChartCarousel tabs={CHART_TABS} height={280} />
+      {/* 数据洞察 — 图表轮播（选择栏在内部） */}
+      <ChartCarousel tabs={CHART_TABS} height={260} />
 
-      {/* 最近更新 — 卡片行 */}
-      {active.length > 0 && (
-        <DeskRow label="进行中" labelColor="#b85c1a" skills={active} onSelect={handleSel} onViewAll={() => setBrowseGroup("active")} />
-      )}
-      {done.length > 0 && (
-        <DeskRow label="已完成" labelColor="#5a4a30" skills={done} onSelect={handleSel} onViewAll={() => setBrowseGroup("done")} />
-      )}
+      {/* 热门技能 — 加权综合排名 Top 7 */}
+      <DeskRow
+        label="热门技能" labelColor="#b85c1a"
+        skills={popular}
+        onSelect={handleSel}
+        onViewAll={() => setBrowseGroup("popular")}
+      />
+
+      {/* 近期活跃 — 更新时间 + 迭代频率 Top 7 */}
+      <DeskRow
+        label="近期活跃" labelColor="#3a6a3a"
+        skills={active}
+        onSelect={handleSel}
+        onViewAll={() => setBrowseGroup("active")}
+      />
+
       <SkillDetail sk={selSk} onClose={handleCloseDet} show={showDet} />
     </>
   );

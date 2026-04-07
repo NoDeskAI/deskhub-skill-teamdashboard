@@ -1,9 +1,8 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import ToggleSwitch from "./ToggleSwitch.jsx";
 
 /**
- * 图表轮播容器 — 顶部滑动标签切换，内容区水平滑动过渡
- * @param {{ tabs: {id:string, label:string, content:ReactNode}[], height?: number }} props
+ * 图表轮播容器 — 选择栏在 desk row 内部顶栏，内容区水平滑动过渡
  */
 export default function ChartCarousel({ tabs, height = 280 }) {
   const [activeId, setActiveId] = useState(tabs[0]?.id);
@@ -11,9 +10,17 @@ export default function ChartCarousel({ tabs, height = 280 }) {
   const containerRef = useRef(null);
 
   return (
-    <div style={{ marginBottom: 16 }}>
-      {/* 滑动标签 */}
-      <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}>
+    <div style={{
+      marginBottom: 16, overflow: "hidden", borderRadius: 14,
+      background: "linear-gradient(180deg, #ede8e0, #e8e2d8)",
+      border: "1px solid rgba(0,0,0,0.05)",
+      boxShadow: "0 1px 4px rgba(0,0,0,0.04), inset 0 1px 0 rgba(255,255,255,0.4)",
+    }}>
+      {/* 选择栏 — 内部顶栏 */}
+      <div style={{
+        display: "flex", justifyContent: "center",
+        padding: "10px 16px 6px",
+      }}>
         <ToggleSwitch
           options={tabs.map(t => ({ id: t.id, label: t.label }))}
           value={activeId}
@@ -23,36 +30,28 @@ export default function ChartCarousel({ tabs, height = 280 }) {
       </div>
 
       {/* 内容区 — 水平滑动 */}
-      <div style={{
-        overflow: "hidden",
-        borderRadius: 14,
-        background: "linear-gradient(180deg, #ede8e0, #e8e2d8)",
-        border: "1px solid rgba(0,0,0,0.05)",
-        boxShadow: "0 1px 4px rgba(0,0,0,0.04), inset 0 1px 0 rgba(255,255,255,0.4)",
-      }}>
-        <div
-          ref={containerRef}
-          style={{
+      <div
+        ref={containerRef}
+        style={{
+          display: "flex",
+          width: `${tabs.length * 100}%`,
+          transform: `translateX(-${activeIdx * (100 / tabs.length)}%)`,
+          transition: "transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)",
+        }}
+      >
+        {tabs.map(tab => (
+          <div key={tab.id} style={{
+            width: `${100 / tabs.length}%`,
+            flexShrink: 0,
+            height,
+            padding: "8px 20px 16px",
             display: "flex",
-            width: `${tabs.length * 100}%`,
-            transform: `translateX(-${activeIdx * (100 / tabs.length)}%)`,
-            transition: "transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)",
-          }}
-        >
-          {tabs.map(tab => (
-            <div key={tab.id} style={{
-              width: `${100 / tabs.length}%`,
-              flexShrink: 0,
-              height,
-              padding: "16px 20px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}>
-              {tab.content}
-            </div>
-          ))}
-        </div>
+            alignItems: "center",
+            justifyContent: "center",
+          }}>
+            {tab.content}
+          </div>
+        ))}
       </div>
     </div>
   );
