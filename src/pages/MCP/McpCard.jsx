@@ -16,7 +16,7 @@ export default function McpCard({ m, style, hovered, onHover, onLeave, onClick, 
         <span style={{ fontFamily: FONT_SANS, fontSize: 11, color: "#9a8a68" }}>{m.ver}</span>
       </div>
       <div style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#4a4540", lineHeight: 1.3, marginBottom: 5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{m.desc}</div>
-      <div style={{ fontFamily: FONT_SANS, fontSize: 11, color: "#9a8a68", marginBottom: 2 }}>维护: {m.maintainer}</div>
+      <div style={{ fontFamily: FONT_SANS, fontSize: 11, color: "#9a8a68", marginBottom: 2 }}>维护: {m.maintainer || '—'}</div>
       <div style={{ fontFamily: FONT_SANS, fontSize: 11, color: "#a89a78", textAlign: "right" }}>{m.updated}</div>
     </BaseCard>
   );

@@ -50,8 +50,8 @@ export default function Sidebar({ tab, setTab, role, setRole, collapsed, setColl
         </svg>
         {!collapsed && (
           <>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: "#3a2a18", marginTop: 6, letterSpacing: 0.8 }}>DeskSkill</div>
-            <div style={{ fontFamily: FONT_SANS, fontSize: 10, color: "#a09888", marginTop: 1, letterSpacing: 2, textTransform: "uppercase" }}>TeamBoard</div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: "#3a2a18", marginTop: 6, letterSpacing: 0.8 }}>DeskHub</div>
+            <div style={{ fontFamily: FONT_SANS, fontSize: 10, color: "#a09888", marginTop: 1, letterSpacing: 2, textTransform: "uppercase" }}>TEAMBOARD</div>
           </>
         )}
       </div>
@@ -174,9 +174,9 @@ export default function Sidebar({ tab, setTab, role, setRole, collapsed, setColl
           </div>
         )}
         {/* 当前角色 */}
-        <div style={{ display: "flex", alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
           <button onClick={() => setRoleOpen(o => !o)} style={{
-            display: "flex", alignItems: "center", flex: 1,
+            display: "flex", alignItems: "center", flex: 1, minWidth: 0,
             padding: "12px 12px", background: "none", border: "none", cursor: "pointer",
             justifyContent: "flex-start", gap: 8,
           }}>
@@ -192,8 +192,8 @@ export default function Sidebar({ tab, setTab, role, setRole, collapsed, setColl
               </div>
               {!collapsed && (
                 <div style={{ flex: 1, textAlign: "left", minWidth: 0, overflow: "hidden" }}>
-                  <div style={{ fontFamily: FONT_SANS, fontSize: 13, fontWeight: 600, color: "#2d2418", whiteSpace: "nowrap" }}>{cr.label}</div>
-                  <div style={{ fontFamily: FONT_SANS, fontSize: 10, color: "#a09888", whiteSpace: "nowrap" }}>{cr.desc}</div>
+                  <div style={{ fontFamily: FONT_SANS, fontSize: 13, fontWeight: 600, color: "#2d2418", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cr.label}</div>
+                  <div style={{ fontFamily: FONT_SANS, fontSize: 10, color: "#a09888", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{cr.desc}</div>
                 </div>
               )}
               {!collapsed && <ChevronUp size={12} style={{ color: "#a09888", flexShrink: 0, transform: roleOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />}

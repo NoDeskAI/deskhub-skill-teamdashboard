@@ -1,13 +1,14 @@
-import { useState, useEffect, useRef } from "react";
-import { X, Upload, FileText } from "lucide-react";
+import { useState, useEffect } from "react";
+import { X, Plus, Trash2, FileText } from "lucide-react";
 import { FONT_MONO, FONT_SANS } from "../../constants/theme.js";
 import StarRate from "../../components/ui/StarRate.jsx";
 import { FInput } from "../../components/ui/Form.jsx";
+import MarkdownInput from "../../components/ui/MarkdownInput.jsx";
 import { td } from "../../utils/helpers.js";
 
 /**
- * 评测打分面板 — 测试员专用，z-index 800 弹窗
- * 选方案 → 上传评测文档（可选）→ 打分 → 提交
+ * 评测打分面板 — 测试员专用
+ * 选方案 → 编写评测文档（Markdown，可多份）→ 打分 → 提交
  */
 export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) {
   const [mounted, setMounted] = useState(false);
@@ -16,8 +17,7 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
   const [scores, setScores] = useState({});
   const [tester, setTester] = useState("");
   const [comment, setComment] = useState("");
-  const [fileName, setFileName] = useState(null);
-  const fileRef = useRef(null);
+  const [evalDocs, setEvalDocs] = useState([]);
 
   const activeDims = (dims || []).filter(d => d.active);
 
@@ -37,28 +37,36 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
 
   const allFilled = selVarId && tester.trim() && activeDims.every(d => scores[d.id] > 0);
 
+  const addDoc = () => setEvalDocs(prev => [...prev, { title: "", content: "" }]);
+  const removeDoc = (idx) => setEvalDocs(prev => prev.filter((_, i) => i !== idx));
+  const updateDoc = (idx, field, val) => setEvalDocs(prev => prev.map((d, i) => i === idx ? { ...d, [field]: val } : d));
+
   const handleSubmit = () => {
     if (!allFilled) return;
+
+    const validDocs = evalDocs.filter(d => d.content.trim());
+    const evalDocJson = validDocs.length > 0
+      ? JSON.stringify(validDocs.map(d => ({ title: d.title.trim() || "评测文档", content: d.content.trim() })))
+      : null;
+
     const scoreEntries = activeDims.map(d => ({
       tester: tester.trim(),
       dimId: d.id,
       value: scores[d.id] || 0,
       comment: comment.trim(),
       date: td(),
-      ...(fileName ? { evalDoc: fileName } : {}),
+      ...(evalDocJson ? { evalDoc: evalDocJson } : {}),
     }));
     onSubmitScores(wo.id, selVarId, scoreEntries);
     setScores({});
     setTester("");
     setComment("");
-    setFileName(null);
+    setEvalDocs([]);
     setSelVarId(null);
   };
 
-  const handleClose = () => onClose();
-
   return (
-    <div onClick={handleClose} style={{
+    <div onClick={onClose} style={{
       position: "fixed", inset: 0, zIndex: 800,
       background: "rgba(0,0,0,0.35)", backdropFilter: "blur(3px)",
       display: "flex", alignItems: "center", justifyContent: "center",
@@ -66,7 +74,7 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
       transition: "opacity 0.3s",
     }}>
       <div onClick={e => e.stopPropagation()} style={{
-        width: 420, maxHeight: "85vh",
+        width: 480, maxHeight: "85vh",
         background: "linear-gradient(180deg, #fdfcfa 0%, #fff 30%)",
         border: "1px solid rgba(0,0,0,0.1)", borderRadius: 16,
         boxShadow: "0 2px 4px rgba(0,0,0,0.04), 0 8px 20px rgba(0,0,0,0.08), 0 24px 48px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.8)",
@@ -81,7 +89,7 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
           flexShrink: 0,
         }}>
           <div style={{ fontFamily: FONT_SANS, fontSize: 16, fontWeight: 600, color: "#3a2a18" }}>评测打分</div>
-          <div onClick={handleClose} style={{
+          <div onClick={onClose} style={{
             width: 28, height: 28, borderRadius: 7,
             display: "flex", alignItems: "center", justifyContent: "center",
             cursor: "pointer", background: "rgba(0,0,0,0.04)", transition: "background 0.15s",
@@ -115,37 +123,6 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
             )}
           </div>
 
-          {/* 上传评测文档（可选） */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 8 }}>评测文档 <span style={{ color: "#b5a898", fontWeight: 400 }}>（选填）</span></div>
-            <input ref={fileRef} type="file" style={{ display: "none" }} onChange={e => { const f = e.target.files?.[0]; if (f) setFileName(f.name); }} />
-            {fileName ? (
-              <div style={{
-                display: "flex", alignItems: "center", gap: 8,
-                padding: "8px 12px", borderRadius: 8,
-                background: "rgba(45,36,24,0.04)", border: "1px solid rgba(0,0,0,0.06)",
-              }}>
-                <FileText size={14} color="#5a7a9a" />
-                <span style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#3a2a18", flex: 1 }}>{fileName}</span>
-                <span onClick={() => setFileName(null)} style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#b83a2a", cursor: "pointer" }}>移除</span>
-              </div>
-            ) : (
-              <div
-                onClick={() => fileRef.current?.click()}
-                style={{
-                  border: "1px dashed rgba(0,0,0,0.12)", borderRadius: 8,
-                  padding: "14px", textAlign: "center", cursor: "pointer",
-                  transition: "border-color 0.15s",
-                }}
-                onMouseEnter={e => e.currentTarget.style.borderColor = "rgba(0,0,0,0.25)"}
-                onMouseLeave={e => e.currentTarget.style.borderColor = "rgba(0,0,0,0.12)"}
-              >
-                <Upload size={18} color="#a09888" style={{ marginBottom: 4 }} />
-                <div style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#a09888" }}>点击上传评测文档</div>
-              </div>
-            )}
-          </div>
-
           {/* 逐项评分 */}
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 10 }}>逐项评分</div>
@@ -164,8 +141,73 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
           <div style={{ marginBottom: 8 }}>
             <FInput label="测试人" value={tester} onChange={e => setTester(e.target.value)} placeholder="你的名字" />
           </div>
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 16 }}>
             <FInput label="评语" value={comment} onChange={e => setComment(e.target.value)} placeholder="选填" multiline />
+          </div>
+
+          {/* 评测文档（Markdown，可多份） */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550" }}>
+                评测文档 <span style={{ color: "#b5a898", fontWeight: 400 }}>（Markdown，选填，支持拖拽 .md 文件）</span>
+              </div>
+              <div onClick={addDoc} style={{
+                display: "flex", alignItems: "center", gap: 3,
+                fontFamily: FONT_SANS, fontSize: 12, color: "#5a7a9a",
+                cursor: "pointer", userSelect: "none",
+              }}>
+                <Plus size={12} />添加文档
+              </div>
+            </div>
+
+            {evalDocs.map((doc, i) => (
+              <div key={i} style={{
+                border: "1px solid rgba(0,0,0,0.08)", borderRadius: 10,
+                padding: 12, marginBottom: 8,
+                background: "rgba(0,0,0,0.015)",
+              }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <FileText size={13} color="#5a7a9a" />
+                  <input
+                    value={doc.title}
+                    onChange={e => updateDoc(i, "title", e.target.value)}
+                    placeholder={`评测文档 ${i + 1}`}
+                    style={{
+                      flex: 1, padding: "4px 8px", border: "none",
+                      borderBottom: "1px dashed rgba(0,0,0,0.1)",
+                      background: "transparent", fontFamily: FONT_SANS,
+                      fontSize: 13, color: "#3a2a18", outline: "none",
+                    }}
+                  />
+                  <div onClick={() => removeDoc(i)} style={{ cursor: "pointer", display: "flex", padding: 2 }}>
+                    <Trash2 size={13} color="#b83a2a" />
+                  </div>
+                </div>
+                <MarkdownInput
+                  value={doc.content}
+                  onChange={val => updateDoc(i, "content", val)}
+                  placeholder={"# 评测结论\n\n## 测试场景\n- 场景一：...\n\n## 发现问题\n..."}
+                  minHeight={120}
+                />
+              </div>
+            ))}
+
+            {evalDocs.length === 0 && (
+              <div
+                onClick={addDoc}
+                style={{
+                  border: "1px dashed rgba(0,0,0,0.1)", borderRadius: 8,
+                  padding: "10px", textAlign: "center", cursor: "pointer",
+                  transition: "border-color 0.15s",
+                }}
+                onMouseEnter={e => e.currentTarget.style.borderColor = "rgba(0,0,0,0.2)"}
+                onMouseLeave={e => e.currentTarget.style.borderColor = "rgba(0,0,0,0.1)"}
+              >
+                <div style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#a09888" }}>
+                  点击添加 Markdown 评测文档
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -180,9 +222,7 @@ export default function ScorePanel({ show, onClose, wo, dims, onSubmitScores }) 
             border: allFilled ? "1px solid #2d2418" : "1px solid rgba(0,0,0,0.08)",
             opacity: allFilled ? 1 : 0.6,
             transition: "all 0.15s",
-          }}>
-            提交评测
-          </button>
+          }}>提交评测</button>
         </div>
       </div>
     </div>

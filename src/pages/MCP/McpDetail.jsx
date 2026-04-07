@@ -27,7 +27,7 @@ export default function McpDetail({ m, onClose, show }) {
             <SIcon s={s} size={11} /> {s.l}
           </span>
           <span style={{ padding: "3px 8px", background: "rgba(90,122,154,0.12)", borderRadius: 6, fontSize: 12, color: "#5a7a9a" }}>MCP</span>
-          <span style={{ padding: "3px 8px", background: "rgba(0,0,0,0.04)", borderRadius: 6, fontSize: 12, color: "#8a7a68" }}>{m.maintainer}</span>
+          <span style={{ padding: "3px 8px", background: "rgba(0,0,0,0.04)", borderRadius: 6, fontSize: 12, color: "#8a7a68" }}>{m.maintainer || '—'}</span>
         </div>
       </div>
 

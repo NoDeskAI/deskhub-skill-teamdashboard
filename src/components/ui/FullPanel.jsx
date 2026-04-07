@@ -6,7 +6,7 @@ import { PANEL } from "../../constants/theme.js";
  * Container Transform 动画壳 — 从 originRect 展开到近全屏
  * 使用 top/left/width/height 动画（非 scale），确保内容正常渲染
  */
-export default function FullPanel({ show, onClose, originRect, children }) {
+export default function FullPanel({ show, onClose, originRect, actions, children }) {
   const [phase, setPhase] = useState("hidden");
 
   useEffect(() => {
@@ -76,13 +76,14 @@ export default function FullPanel({ show, onClose, originRect, children }) {
           opacity: isExpanded ? 1 : 0,
           transition: "opacity 0.3s ease 0.2s",
         }}>
-          {/* 关闭按钮 */}
+          {/* 顶栏：操作按钮 + 关闭 */}
           <div style={{
             position: "sticky", top: 0, zIndex: 10,
-            display: "flex", justifyContent: "flex-end",
+            display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8,
             padding: "12px 16px 0",
             background: "linear-gradient(180deg, rgba(253,252,250,0.95) 0%, rgba(253,252,250,0) 100%)",
           }}>
+            {actions}
             <div onClick={handleClose} style={{
               width: 32, height: 32, borderRadius: 8,
               display: "flex", alignItems: "center", justifyContent: "center",

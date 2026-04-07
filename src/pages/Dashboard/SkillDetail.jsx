@@ -1,5 +1,4 @@
 import { ST } from "../../constants/status.js";
-import { INIT_PLANS } from "../../constants/mock-data.js";
 import { FONT_MONO, FONT_SANS } from "../../constants/theme.js";
 import { SIcon } from "../../components/ui/Icons.jsx";
 import { GitCommit, ClipboardList } from "lucide-react";
@@ -7,9 +6,9 @@ import DetailModal from "../../components/ui/DetailModal.jsx";
 import DataCard from "../../components/ui/DataCard.jsx";
 import MiniBar from "../../components/ui/MiniBar.jsx";
 
-export default function SkillDetail({ sk, onClose, show }) {
+export default function SkillDetail({ sk, onClose, show, plans = [] }) {
   if (!sk) return null;
-  const s = ST[sk.status];
+  const s = ST[sk.status] || { l: "未标注", c: "#a09888", tagBg: "#c4c0b8", Icon: null };
 
   // 下载趋势判断
   const trend = sk.dlTrend && sk.dlTrend.length >= 7
@@ -19,7 +18,7 @@ export default function SkillDetail({ sk, onClose, show }) {
   const weekDl = sk.dlTrend ? sk.dlTrend.reduce((a, b) => a + b, 0) : null;
 
   // 关联工单
-  const relatedPlan = sk.relatedPlanId ? INIT_PLANS.find(p => p.id === sk.relatedPlanId) : null;
+  const relatedPlan = sk.relatedPlanId ? plans.find(p => p.id === sk.relatedPlanId) : null;
 
   return (
     <DetailModal show={show} onClose={onClose} width={380}>

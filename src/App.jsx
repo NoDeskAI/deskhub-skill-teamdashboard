@@ -1,17 +1,41 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { INIT_PLANS, INIT_DIMS } from "./constants/mock-data.js";
+import { fetchPlans, fetchDimensions } from "./services/workService.js";
 import Sidebar from "./components/layout/Sidebar.jsx";
 import Dashboard from "./pages/Dashboard/index.jsx";
 import WorkBench from "./pages/WorkBench/index.jsx";
 import SpellBook from "./pages/MCP/index.jsx";
 
+const USE_API = import.meta.env.VITE_USE_API !== 'false';
+
 export default function App() {
   const [tab, setTab] = useState("dashboard");
   const [collapsed, setCollapsed] = useState(false);
-  const [plans, setPlans] = useState(INIT_PLANS);
+  const [plans, setPlans] = useState(USE_API ? [] : INIT_PLANS);
   const [role, setRole] = useState("admin");
-  const [dims, setDims] = useState(INIT_DIMS);
+  const [dims, setDims] = useState(USE_API ? [] : INIT_DIMS);
   const [showDimMgr, setShowDimMgr] = useState(false);
+
+  // 从后端 API 加载 plans + dims
+  useEffect(() => {
+    if (!USE_API) return;
+    let cancelled = false;
+    Promise.allSettled([fetchPlans(), fetchDimensions()])
+      .then(([plansRes, dimsRes]) => {
+        if (cancelled) return;
+        if (plansRes.status === "fulfilled" && Array.isArray(plansRes.value)) {
+          setPlans(plansRes.value);
+        } else {
+          console.warn("[App] plans API 不可用");
+        }
+        if (dimsRes.status === "fulfilled" && Array.isArray(dimsRes.value)) {
+          setDims(dimsRes.value);
+        } else {
+          console.warn("[App] dims API 不可用");
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   return (
     <div style={{ display: "flex", height: "100vh", background: "#F9F8F6", overflow: "hidden" }}>
@@ -20,7 +44,10 @@ export default function App() {
         role={role} setRole={setRole}
         collapsed={collapsed} setCollapsed={setCollapsed}
         onResetBrowse={() => {}}
-        onOpenDimMgr={role === "admin" ? () => setShowDimMgr(true) : null}
+        onOpenDimMgr={role === "admin" ? () => {
+          if (tab !== "workbench") setTab("workbench");
+          setShowDimMgr(true);
+        } : null}
       />
 
       <div style={{ flex: 1, overflowY: "auto", minWidth: 0 }}>

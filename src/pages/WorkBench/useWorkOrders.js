@@ -1,82 +1,146 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { nPid, nVid, td } from "../../utils/helpers.js";
+import * as api from "../../services/workService.js";
+
+const USE_API = import.meta.env.VITE_USE_API !== 'false';
 
 /**
- * 工单 CRUD hook — 封装所有数据变更操作
+ * 工单 CRUD hook — 乐观更新 + 后端持久化
+ * 操作流程：立即更新本地 state → 异步调 API → 失败回滚
  */
-export default function useWorkOrders(plans, setPlans) {
+export default function useWorkOrders(plans, setPlans, role = 'admin') {
+
+  const rollbackRef = useRef(null);
+
+  /** 保存回滚快照 */
+  const snap = () => { rollbackRef.current = plans; };
+  /** 回滚 */
+  const rollback = (err) => {
+    console.error('[workOrders] API 失败，回滚:', err?.message || err);
+    if (rollbackRef.current) setPlans(rollbackRef.current);
+  };
+
+  // --- 工单 ---
 
   const addPlan = useCallback((data) => {
+    const tempId = nPid();
     const plan = {
-      id: nPid(),
-      name: data.name || "新工单",
-      type: data.type || "skill",
-      status: data.status || "next",
-      priority: data.priority || "medium",
-      created: td(),
-      desc: data.desc || "",
-      result: null,
+      id: tempId, name: data.name || "新工单", type: data.type || "skill",
+      status: data.status || "next", priority: data.priority || "medium",
+      created: td(), desc: data.desc || "", result: null,
+      owner: data.owner || "", deadline: data.deadline || "",
       variants: [],
     };
     setPlans(prev => [...prev, plan]);
+
+    if (USE_API) {
+      api.createPlan({
+        name: plan.name, type: plan.type, priority: plan.priority,
+        desc: plan.desc, status: plan.status,
+        owner: plan.owner, deadline: plan.deadline,
+      }, role)
+        .then(serverPlan => {
+          setPlans(prev => prev.map(p => p.id === tempId ? {
+            ...p, id: serverPlan.id, created: serverPlan.created,
+            owner: serverPlan.owner, deadline: serverPlan.deadline,
+          } : p));
+        })
+        .catch(rollback);
+    }
     return plan;
-  }, [setPlans]);
+  }, [setPlans, plans, role]);
 
   const editPlan = useCallback((id, data) => {
+    snap();
     setPlans(prev => prev.map(p => p.id === id ? { ...p, ...data } : p));
-  }, [setPlans]);
+    if (USE_API) api.editPlan(id, data, role).catch(rollback);
+  }, [setPlans, plans, role]);
 
   const deletePlan = useCallback((id) => {
+    snap();
     setPlans(prev => prev.filter(p => p.id !== id));
-  }, [setPlans]);
+    if (USE_API) api.deletePlan(id, role).catch(rollback);
+  }, [setPlans, plans, role]);
 
   const updatePlan = useCallback((updatedWo) => {
     setPlans(prev => prev.map(p => p.id === updatedWo.id ? updatedWo : p));
   }, [setPlans]);
 
-  // 状态流转
   const activatePlan = useCallback((id) => {
+    snap();
     setPlans(prev => prev.map(p => p.id === id ? { ...p, status: "active" } : p));
-  }, [setPlans]);
+    if (USE_API) api.updatePlanStatus(id, { status: "active" }, role).catch(rollback);
+  }, [setPlans, plans, role]);
 
   const completePlan = useCallback((id, result) => {
+    snap();
     setPlans(prev => prev.map(p => p.id === id ? { ...p, status: "done", result: result || "adopted" } : p));
-  }, [setPlans]);
+    if (USE_API) api.updatePlanStatus(id, { status: "done", result: result || "adopted" }, role).catch(rollback);
+  }, [setPlans, plans, role]);
 
   const shelvePlan = useCallback((id) => {
+    snap();
     setPlans(prev => prev.map(p => p.id === id ? { ...p, status: "done", result: "shelved" } : p));
-  }, [setPlans]);
+    if (USE_API) api.updatePlanStatus(id, { status: "done", result: "shelved" }, role).catch(rollback);
+  }, [setPlans, plans, role]);
 
-  // 方案操作
+  const reopenPlan = useCallback((id) => {
+    snap();
+    setPlans(prev => prev.map(p => p.id === id ? { ...p, status: "active", result: null } : p));
+    if (USE_API) api.updatePlanStatus(id, { status: "active" }, role).catch(rollback);
+  }, [setPlans, plans, role]);
+
+  // --- 方案 ---
+
   const addVariant = useCallback((planId, data) => {
+    const tempId = nVid();
     const variant = {
-      id: nVid(),
-      name: data.name || "新方案",
-      uploader: data.uploader || "未知",
-      uploaded: td(),
-      desc: data.desc || "",
-      link: data.link || "",
-      scores: [],
+      id: tempId, name: data.name || "新方案", uploader: data.uploader || "未知",
+      uploaded: td(), desc: data.desc || "", link: data.link || "",
+      content: data.content || null, scores: [],
     };
     setPlans(prev => prev.map(p => p.id === planId ? { ...p, variants: [...p.variants, variant] } : p));
+
+    if (USE_API) {
+      api.createVariant(planId, { name: variant.name, uploader: variant.uploader, desc: variant.desc, link: variant.link, content: variant.content }, role)
+        .then(serverVar => {
+          setPlans(prev => prev.map(p => p.id === planId ? {
+            ...p, variants: p.variants.map(v => v.id === tempId ? { ...v, id: serverVar.id, uploaded: serverVar.uploaded } : v),
+          } : p));
+        })
+        .catch(rollback);
+    }
     return variant;
-  }, [setPlans]);
+  }, [setPlans, plans, role]);
 
   const deleteVariant = useCallback((planId, variantId) => {
+    snap();
     setPlans(prev => prev.map(p => p.id === planId ? { ...p, variants: p.variants.filter(v => v.id !== variantId) } : p));
-  }, [setPlans]);
+    if (USE_API) api.deleteVariant(variantId, role).catch(rollback);
+  }, [setPlans, plans, role]);
 
-  // 提交评分
+  // --- 评分 ---
+
   const submitScores = useCallback((planId, variantId, scoreEntries) => {
+    snap();
     setPlans(prev => prev.map(p => p.id === planId ? {
       ...p,
       variants: p.variants.map(v => v.id === variantId ? { ...v, scores: [...(v.scores || []), ...scoreEntries] } : v),
     } : p));
-  }, [setPlans]);
+
+    if (USE_API) {
+      const body = {
+        tester: scoreEntries[0]?.tester,
+        scores: scoreEntries.map(s => ({ dim_id: s.dimId, value: s.value, comment: s.comment || '' })),
+        evalDoc: scoreEntries[0]?.evalDoc || null,
+      };
+      api.submitScores(variantId, body, role).catch(rollback);
+    }
+  }, [setPlans, plans, role]);
 
   return {
     addPlan, editPlan, deletePlan, updatePlan,
-    activatePlan, completePlan, shelvePlan,
+    activatePlan, completePlan, shelvePlan, reopenPlan,
     addVariant, deleteVariant, submitScores,
   };
 }

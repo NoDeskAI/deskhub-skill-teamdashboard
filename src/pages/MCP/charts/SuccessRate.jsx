@@ -1,13 +1,15 @@
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, ReferenceLine } from "recharts";
 import { FONT_SANS } from "../../../constants/theme.js";
-import { MCPS } from "../../../constants/mock-data.js";
 
-const data = MCPS.filter(m => m.calls > 0).map(m => ({
-  name: m.name,
-  成功率: m.successRate,
-}));
+export default function SuccessRate({ mcps = [] }) {
+  const data = mcps.filter(m => m.calls > 0 && m.successRate != null).map(m => ({
+    name: m.name, 成功率: m.successRate,
+  }));
 
-export default function SuccessRate() {
+  if (data.length === 0) {
+    return <div style={{ color: '#aaa', fontSize: 13, textAlign: 'center', padding: 40 }}>成功率暂无数据</div>;
+  }
+
   return (
     <div style={{ width: "100%" }}>
       <div style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#7a6a55", marginBottom: 8 }}>MCP 成功率对比</div>

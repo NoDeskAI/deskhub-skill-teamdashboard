@@ -1,6 +1,5 @@
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { Flame, ScrollText, BadgeCheck } from "lucide-react";
-import { INIT_DIMS, SKILLS } from "../../constants/mock-data.js";
 import { PLAN_PHASE, PLAN_RESULT } from "../../constants/status.js";
 import { PRI } from "../../constants/priority.js";
 import { FONT_MONO, FONT_SANS } from "../../constants/theme.js";
@@ -9,6 +8,7 @@ import { nDid } from "../../utils/helpers.js";
 import Stat from "../../components/ui/Stat.jsx";
 import ToggleSwitch from "../../components/ui/ToggleSwitch.jsx";
 import { FInput, FSelect } from "../../components/ui/Form.jsx";
+import MarkdownInput from "../../components/ui/MarkdownInput.jsx";
 import WoSection from "./WoSection.jsx";
 import WoDeskRow from "./WoDeskRow.jsx";
 import WoBrowse from "./WoBrowse.jsx";
@@ -16,6 +16,9 @@ import WoFullPanel from "./WoFullPanel.jsx";
 import DocReader from "./DocReader.jsx";
 import ScorePanel from "./ScorePanel.jsx";
 import useWorkOrders from "./useWorkOrders.js";
+import * as workApi from "../../services/workService.js";
+
+const USE_API = import.meta.env.VITE_USE_API !== 'false';
 
 const TYPE_OPTIONS = [
   { id: "skill", label: "Skill" },
@@ -40,7 +43,15 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
   const [showDocReader, setShowDocReader] = useState(false);
   const [showScorePanel, setShowScorePanel] = useState(false);
 
-  const ops = useWorkOrders(plans, setPlans);
+  // 维度回滚机制
+  const dimsSnapRef = useRef(null);
+  const snapDims = () => { dimsSnapRef.current = dims; };
+  const rollbackDims = (err) => {
+    console.error('[dims] API 失败，回滚:', err?.message || err);
+    if (dimsSnapRef.current) setDims(dimsSnapRef.current);
+  };
+
+  const ops = useWorkOrders(plans, setPlans, role);
   const activeDims = dims.filter(d => d.active);
 
   // 按类型过滤
@@ -75,6 +86,14 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
     return groups;
   }, [done]);
 
+  // fullWo 与 plans 自动同步 — 任何 plans 变更自动反映到 FullPanel
+  useEffect(() => {
+    if (fullWo) {
+      const latest = plans.find(p => p.id === fullWo.id);
+      if (latest && latest !== fullWo) setFullWo(latest);
+    }
+  }, [plans]);
+
   // 卡片飞回回调 — FullPanel 关闭后触发卡片收回动画
   const cardReturnRef = useRef(null);
 
@@ -100,12 +119,12 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
     }, 450);
   }, []);
 
-  // DocReader
-  const openDocReader = (variant) => {
-    if (variant.content) {
-      setDocReaderData({ title: variant.name, content: variant.content });
-      setShowDocReader(true);
-    }
+  // DocReader — 接受 {name,content}(方案) 或 {title,content}(评测文档)
+  const openDocReader = (doc) => {
+    const content = doc.content;
+    if (!content) return;
+    setDocReaderData({ title: doc.title || doc.name || "文档", content });
+    setShowDocReader(true);
   };
   const closeDocReader = () => {
     setShowDocReader(false);
@@ -117,10 +136,6 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
   const closeScorePanel = () => setShowScorePanel(false);
   const handleScoreSubmit = (planId, variantId, scoreEntries) => {
     ops.submitScores(planId, variantId, scoreEntries);
-    setTimeout(() => {
-      const latest = plans.find(p => p.id === planId);
-      if (latest) setFullWo({ ...latest });
-    }, 50);
     setShowScorePanel(false);
   };
 
@@ -137,9 +152,9 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
 
   const openCreate = () => openForm("create", {
     name: "", type: typeFilter, status: "next", priority: "medium", desc: "",
-    deadline: "", owner: "", relatedSkill: "", attachment: "",
+    deadline: "", owner: "",
   });
-  const openAddVar = (wo) => openForm("addVar", { planId: wo.id, name: "", uploader: "", desc: "", link: "" });
+  const openAddVar = (wo) => openForm("addVar", { planId: wo.id, name: "", uploader: "", desc: "", link: "", content: "", showDocEditor: false });
   const openMarkComplete = (wo) => {
     const activeDimsLocal = dims.filter(d => d.active);
     const vars = wo?.variants || [];
@@ -154,12 +169,6 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
       closeForm();
     } else if (fMode === "addVar" && fData.planId) {
       ops.addVariant(fData.planId, fData);
-      if (fullWo && fullWo.id === fData.planId) {
-        setTimeout(() => {
-          const latest = plans.find(p => p.id === fData.planId);
-          if (latest) setFullWo({ ...latest });
-        }, 50);
-      }
       closeForm();
     } else if (fMode === "complete" && fData.planId) {
       ops.completePlan(fData.planId, fData.result);
@@ -169,11 +178,40 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
     }
   };
 
-  // 维度管理
-  const addDim = () => { if (!newDim.trim()) return; setDims(prev => [...prev, { id: nDid(), name: newDim.trim(), max: 10, active: true }]); setNewDim(""); };
-  const delDim = id => setDims(prev => prev.filter(d => d.id !== id));
-  const toggleDim = id => setDims(prev => prev.map(d => d.id === id ? { ...d, active: !d.active } : d));
-  const editDim = (id, field, val) => setDims(prev => prev.map(d => d.id === id ? { ...d, [field]: val } : d));
+  // 维度管理 — 乐观更新 + API 持久化
+  const addDim = () => {
+    if (!newDim.trim()) return;
+    const tempId = nDid();
+    const dim = { id: tempId, name: newDim.trim(), max: 10, active: true };
+    setDims(prev => [...prev, dim]);
+    setNewDim("");
+    if (USE_API) {
+      workApi.createDimension({ name: dim.name, max: dim.max }, role)
+        .then(serverDim => {
+          setDims(prev => prev.map(d => d.id === tempId ? { ...d, id: serverDim.id } : d));
+        })
+        .catch(err => {
+          console.error('[dims/add] failed:', err?.message);
+          setDims(prev => prev.filter(d => d.id !== tempId));
+        });
+    }
+  };
+  const delDim = id => {
+    snapDims();
+    setDims(prev => prev.filter(d => d.id !== id));
+    if (USE_API) workApi.deleteDimension(id, role).catch(rollbackDims);
+  };
+  const toggleDim = id => {
+    snapDims();
+    const current = dims.find(d => d.id === id);
+    setDims(prev => prev.map(d => d.id === id ? { ...d, active: !d.active } : d));
+    if (USE_API) workApi.editDimension(id, { active: !(current?.active) }, role).catch(rollbackDims);
+  };
+  const editDim = (id, field, val) => {
+    snapDims();
+    setDims(prev => prev.map(d => d.id === id ? { ...d, [field]: val } : d));
+    if (USE_API) workApi.editDimension(id, { [field]: val }, role).catch(rollbackDims);
+  };
 
   // 浏览模式
   if (browseSection) {
@@ -186,7 +224,9 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
         <WoBrowse label={browseSection === "active" ? "进行中" : browseSection === "next" ? "下期规划" : "已完成"} wos={bWos} onBack={() => setBrowseSection(null)} onSelect={handleExpandFull} />
         <WoFullPanel wo={fullWo} dims={dims} show={showFull} originRect={fullOriginRect} onClose={handleCloseFull}
           role={role} onAddVariant={openAddVar} onMarkComplete={openMarkComplete}
-          onOpenScorePanel={openScorePanel} onOpenDocReader={openDocReader} />
+          onOpenScorePanel={openScorePanel} onOpenDocReader={openDocReader}
+          onActivate={wo => ops.activatePlan(wo.id)}
+          onReopen={wo => ops.reopenPlan(wo.id)} />
         {formUI()}
         {docReaderData && <DocReader show={showDocReader} onClose={closeDocReader} title={docReaderData.title} content={docReaderData.content} />}
         {fullWo && <ScorePanel show={showScorePanel} onClose={closeScorePanel} wo={fullWo} dims={dims} onSubmitScores={handleScoreSubmit} />}
@@ -208,7 +248,8 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
         pointerEvents: showForm ? "auto" : "none",
       }}>
         <div onClick={e => e.stopPropagation()} style={{
-          width: fMode === "create" ? 440 : fMode === "complete" ? 400 : 380,
+          width: fMode === "create" ? 440 : fMode === "complete" ? 400 : 460,
+          maxHeight: "85vh", display: "flex", flexDirection: "column",
           background: "linear-gradient(180deg, #fdfcfa 0%, #fff 30%)",
           border: "1px solid rgba(0,0,0,0.1)", borderRadius: 16,
           boxShadow: "0 2px 4px rgba(0,0,0,0.04), 0 8px 20px rgba(0,0,0,0.08), 0 24px 48px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.8)",
@@ -224,45 +265,53 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
           </div>
 
           {/* 表单内容 */}
-          <div style={{ padding: "16px 20px" }}>
+          <div style={{ padding: "16px 20px", flex: 1, overflowY: "auto" }}>
             {fMode === "create" && <>
               <FInput label="工单名称" value={fData.name} onChange={e => setFData(p => ({ ...p, name: e.target.value }))} placeholder="如 PPT生成优化" />
               <div style={{ display: "flex", gap: 10 }}>
                 <div style={{ flex: 1 }}><FSelect label="类型" value={fData.type} onChange={v => setFData(p => ({ ...p, type: v }))} options={[{ v: "skill", l: "Skill" }, { v: "mcp", l: "MCP" }]} /></div>
                 <div style={{ flex: 1 }}><FSelect label="优先级" value={fData.priority} onChange={v => setFData(p => ({ ...p, priority: v }))} options={[{ v: "high", l: "高", c: "#b83a2a" }, { v: "medium", l: "中", c: "#b8861a" }, { v: "low", l: "低", c: "#5a8a5a" }]} /></div>
               </div>
+              <FSelect label="状态" value={fData.status} onChange={v => setFData(p => ({ ...p, status: v }))} options={[{ v: "next", l: "规划中", c: "#3a6a3a" }, { v: "active", l: "立即开始", c: "#b85c1a" }]} />
               <FInput label="描述" value={fData.desc} onChange={e => setFData(p => ({ ...p, desc: e.target.value }))} placeholder="目标和要求说明" multiline />
               <div style={{ display: "flex", gap: 10 }}>
                 <div style={{ flex: 1 }}><FInput label="负责人" value={fData.owner} onChange={e => setFData(p => ({ ...p, owner: e.target.value }))} placeholder="发起人姓名" /></div>
-                <div style={{ flex: 1 }}><FInput label="截止日期" value={fData.deadline} onChange={e => setFData(p => ({ ...p, deadline: e.target.value }))} placeholder="如 04-30" /></div>
-              </div>
-              {/* 关联技能选择 */}
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#7a6a55", marginBottom: 6 }}>关联技能</div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {SKILLS.slice(0, 8).map(sk => (
-                    <div key={sk.slug} onClick={() => setFData(p => ({ ...p, relatedSkill: p.relatedSkill === sk.slug ? "" : sk.slug }))}
-                      style={{
-                        padding: "4px 10px", borderRadius: 6, cursor: "pointer",
-                        fontSize: 12, fontFamily: FONT_SANS,
-                        border: fData.relatedSkill === sk.slug ? "2px solid #3a2a18" : "1px solid rgba(0,0,0,0.08)",
-                        background: fData.relatedSkill === sk.slug ? "rgba(45,36,24,0.06)" : "rgba(0,0,0,0.02)",
-                        color: fData.relatedSkill === sk.slug ? "#3a2a18" : "#8a7a62",
-                        transition: "all 0.15s",
-                      }}>
-                      {sk.name}
-                    </div>
-                  ))}
+                <div style={{ flex: 1 }}>
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontFamily: FONT_SANS, fontSize: 15, color: "#5a5550", marginBottom: 4 }}>截止日期</div>
+                    <input type="date" value={fData.deadline} onChange={e => setFData(p => ({ ...p, deadline: e.target.value }))}
+                      style={{ width: "100%", padding: "8px 10px", background: "rgba(255,255,255,0.4)", border: "1px solid rgba(0,0,0,0.06)", borderRadius: 8, fontFamily: FONT_SANS, fontSize: 17, color: "#3a2a18", outline: "none", boxSizing: "border-box" }} />
+                  </div>
                 </div>
               </div>
-              {/* 初始附件/参考 */}
-              <FInput label="参考资料" value={fData.attachment} onChange={e => setFData(p => ({ ...p, attachment: e.target.value }))} placeholder="思路文档、参考方案链接（选填）" />
             </>}
             {fMode === "addVar" && <>
               <FInput label="方案名称" value={fData.name} onChange={e => setFData(p => ({ ...p, name: e.target.value }))} placeholder="如 NotebookLM 方案" />
               <FInput label="上传人" value={fData.uploader} onChange={e => setFData(p => ({ ...p, uploader: e.target.value }))} />
               <FInput label="方案说明" value={fData.desc} onChange={e => setFData(p => ({ ...p, desc: e.target.value }))} placeholder="简述技术路线、优缺点等" multiline />
-              <FInput label="文件/链接" value={fData.link} onChange={e => setFData(p => ({ ...p, link: e.target.value }))} placeholder="方案文档地址（选填）" />
+              <FInput label="外部链接" value={fData.link} onChange={e => setFData(p => ({ ...p, link: e.target.value }))} placeholder="参考文档 URL（选填）" />
+              {/* 方案文档 — Markdown 内容编辑 */}
+              <div style={{ marginBottom: 12 }}>
+                <div
+                  onClick={() => setFData(p => ({ ...p, showDocEditor: !p.showDocEditor }))}
+                  style={{
+                    fontFamily: FONT_SANS, fontSize: 13, color: "#5a7a9a", cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 4, marginBottom: fData.showDocEditor ? 6 : 0,
+                    userSelect: "none",
+                  }}>
+                  <span style={{ fontSize: 10, transform: fData.showDocEditor ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>▶</span>
+                  方案文档（Markdown）
+                  {fData.content && <span style={{ fontSize: 11, color: "#4a8a4a", marginLeft: 4 }}>已填写</span>}
+                </div>
+                {fData.showDocEditor && (
+                  <MarkdownInput
+                    value={fData.content}
+                    onChange={val => setFData(p => ({ ...p, content: val }))}
+                    placeholder={"# 方案标题\n\n## 技术方案\n- 要点一\n- 要点二\n\n## 预期效果\n..."}
+                    minHeight={160}
+                  />
+                )}
+              </div>
             </>}
             {fMode === "complete" && <>
               {/* 结论选择 */}
@@ -442,7 +491,9 @@ export default function WorkBench({ plans, setPlans, role, dims, setDims, showDi
       {/* FullPanel 第三层 */}
       <WoFullPanel wo={fullWo} dims={dims} show={showFull} originRect={fullOriginRect} onClose={handleCloseFull}
         role={role} onAddVariant={openAddVar} onMarkComplete={openMarkComplete}
-        onOpenScorePanel={openScorePanel} onOpenDocReader={openDocReader} />
+        onOpenScorePanel={openScorePanel} onOpenDocReader={openDocReader}
+        onActivate={wo => ops.activatePlan(wo.id)}
+        onReopen={wo => ops.reopenPlan(wo.id)} />
 
       {/* 表单 */}
       {formUI()}
