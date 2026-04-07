@@ -151,27 +151,87 @@ export default function WorkBench({ plans, setPlans, role }) {
 
   function formUI() {
     if (!fMode) return null;
+
+    const titles = { create: "新建工单", addVar: "添加方案", complete: "定稿" };
+
     return (
-      <FormModal title={fMode === "create" ? "新建工单" : fMode === "addVar" ? "添加方案" : "标记完成"} show={true} onClose={() => setFMode(null)}>
-        {fMode === "create" && <>
-          <FInput label="工单名称" value={fData.name} onChange={e => setFData(p => ({ ...p, name: e.target.value }))} placeholder="如 PPT生成优化" />
-          <FSelect label="类型" value={fData.type} onChange={v => setFData(p => ({ ...p, type: v }))} options={[{ v: "skill", l: "Skill" }, { v: "mcp", l: "MCP" }]} />
-          <FSelect label="优先级" value={fData.priority} onChange={v => setFData(p => ({ ...p, priority: v }))} options={[{ v: "high", l: "高", c: "#b83a2a" }, { v: "medium", l: "中", c: "#b8861a" }, { v: "low", l: "低", c: "#5a8a5a" }]} />
-          <FInput label="描述" value={fData.desc} onChange={e => setFData(p => ({ ...p, desc: e.target.value }))} multiline />
-          <FBtn label="创建" onClick={save} full />
-        </>}
-        {fMode === "addVar" && <>
-          <FInput label="方案名称" value={fData.name} onChange={e => setFData(p => ({ ...p, name: e.target.value }))} placeholder="如 NotebookLM 方案" />
-          <FInput label="上传人" value={fData.uploader} onChange={e => setFData(p => ({ ...p, uploader: e.target.value }))} />
-          <FInput label="方案说明" value={fData.desc} onChange={e => setFData(p => ({ ...p, desc: e.target.value }))} placeholder="简述技术路线、优缺点等" multiline />
-          <FInput label="文件/链接" value={fData.link} onChange={e => setFData(p => ({ ...p, link: e.target.value }))} placeholder="方案文档地址（选填）" />
-          <FBtn label="添加" onClick={save} full />
-        </>}
-        {fMode === "complete" && <>
-          <FSelect label="完成结果" value={fData.result} onChange={v => setFData(p => ({ ...p, result: v }))} options={[{ v: "adopted", l: "已采纳", c: "#4a8a4a" }, { v: "shelved", l: "已搁置", c: "#8a8580" }]} />
-          <FBtn label="确认" onClick={save} full />
-        </>}
-      </FormModal>
+      <div onClick={() => setFMode(null)} style={{
+        position: "fixed", inset: 0, zIndex: 800,
+        background: "rgba(0,0,0,0.35)", backdropFilter: "blur(3px)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        opacity: 1, transition: "opacity 0.3s",
+      }}>
+        <div onClick={e => e.stopPropagation()} style={{
+          width: fMode === "complete" ? 320 : 380,
+          background: "linear-gradient(180deg, #fdfcfa 0%, #fff 30%)",
+          border: "1px solid rgba(0,0,0,0.1)", borderRadius: 16,
+          boxShadow: "0 2px 4px rgba(0,0,0,0.04), 0 8px 20px rgba(0,0,0,0.08), 0 24px 48px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.8)",
+          overflow: "hidden",
+          transform: "scale(1) translateY(0)",
+          transition: "transform 0.4s cubic-bezier(0.25, 1, 0.5, 1)",
+        }}>
+          {/* 标题栏 */}
+          <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
+            <div style={{ fontFamily: FONT_SANS, fontSize: 16, fontWeight: 600, color: "#3a2a18" }}>
+              {titles[fMode]}
+            </div>
+          </div>
+
+          {/* 表单内容 */}
+          <div style={{ padding: "16px 20px" }}>
+            {fMode === "create" && <>
+              <FInput label="工单名称" value={fData.name} onChange={e => setFData(p => ({ ...p, name: e.target.value }))} placeholder="如 PPT生成优化" />
+              <FSelect label="类型" value={fData.type} onChange={v => setFData(p => ({ ...p, type: v }))} options={[{ v: "skill", l: "Skill" }, { v: "mcp", l: "MCP" }]} />
+              <FSelect label="优先级" value={fData.priority} onChange={v => setFData(p => ({ ...p, priority: v }))} options={[{ v: "high", l: "高", c: "#b83a2a" }, { v: "medium", l: "中", c: "#b8861a" }, { v: "low", l: "低", c: "#5a8a5a" }]} />
+              <FInput label="描述" value={fData.desc} onChange={e => setFData(p => ({ ...p, desc: e.target.value }))} multiline />
+            </>}
+            {fMode === "addVar" && <>
+              <FInput label="方案名称" value={fData.name} onChange={e => setFData(p => ({ ...p, name: e.target.value }))} placeholder="如 NotebookLM 方案" />
+              <FInput label="上传人" value={fData.uploader} onChange={e => setFData(p => ({ ...p, uploader: e.target.value }))} />
+              <FInput label="方案说明" value={fData.desc} onChange={e => setFData(p => ({ ...p, desc: e.target.value }))} placeholder="简述技术路线、优缺点等" multiline />
+              <FInput label="文件/链接" value={fData.link} onChange={e => setFData(p => ({ ...p, link: e.target.value }))} placeholder="方案文档地址（选填）" />
+            </>}
+            {fMode === "complete" && <>
+              <div style={{ fontFamily: FONT_SANS, fontSize: 14, color: "#5a5550", marginBottom: 12, lineHeight: 1.5 }}>
+                确认定稿后，工单将移至已完成区。请选择结论：
+              </div>
+              <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+                {[
+                  { v: "adopted", l: "采纳方案", desc: "选定最优方案，内置上线" },
+                  { v: "shelved", l: "搁置", desc: "暂不推进，保留记录" },
+                ].map(o => (
+                  <div key={o.v} onClick={() => setFData(p => ({ ...p, result: o.v }))}
+                    style={{
+                      flex: 1, padding: "12px", borderRadius: 10, cursor: "pointer",
+                      border: fData.result === o.v ? "2px solid #3a2a18" : "1px solid rgba(0,0,0,0.08)",
+                      background: fData.result === o.v ? "rgba(45,36,24,0.06)" : "rgba(0,0,0,0.02)",
+                      transition: "all 0.15s",
+                    }}>
+                    <div style={{ fontFamily: FONT_SANS, fontSize: 14, fontWeight: 600, color: "#3a2a18", marginBottom: 4 }}>{o.l}</div>
+                    <div style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#8a7a62" }}>{o.desc}</div>
+                  </div>
+                ))}
+              </div>
+            </>}
+          </div>
+
+          {/* 底部按钮 */}
+          <div style={{ padding: "0 20px 16px", display: "flex", gap: 10 }}>
+            <button onClick={() => setFMode(null)} style={{
+              flex: 1, padding: "10px", borderRadius: 8, cursor: "pointer",
+              fontFamily: FONT_SANS, fontSize: 14, fontWeight: 500,
+              background: "rgba(0,0,0,0.04)", color: "#5a5550",
+              border: "1px solid rgba(0,0,0,0.08)", transition: "all 0.15s",
+            }}>取消</button>
+            <button onClick={save} style={{
+              flex: 1, padding: "10px", borderRadius: 8, cursor: "pointer",
+              fontFamily: FONT_SANS, fontSize: 14, fontWeight: 500,
+              background: "#2d2418", color: "#f5f0e8",
+              border: "1px solid #2d2418", transition: "all 0.15s",
+            }}>{fMode === "create" ? "创建" : fMode === "addVar" ? "添加" : "确认定稿"}</button>
+          </div>
+        </div>
+      </div>
     );
   }
 

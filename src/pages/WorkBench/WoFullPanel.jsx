@@ -127,19 +127,21 @@ export default function WoFullPanel({ wo, dims, show, originRect, onClose, onUpd
             </div>
           )}
         </div>
-        {/* 右上角操作按钮 */}
-        <div style={{ display: "flex", gap: 8, flexShrink: 0, marginLeft: 16 }}>
-          {(role === "admin" || role === "member") && wo.status === "active" && (
-            <button onClick={() => onAddVariant && onAddVariant(wo)} style={btnStyle}>
-              <Plus size={13} style={{ marginRight: 4 }} />添加方案
-            </button>
-          )}
-          {role === "admin" && wo.status === "active" && (
-            <button onClick={() => onMarkComplete && onMarkComplete(wo)} style={{ ...btnStyle, background: "rgba(74,138,74,0.1)", color: "#4a8a4a", border: "1px solid rgba(74,138,74,0.2)" }}>
-              标记完成
-            </button>
-          )}
-        </div>
+        {/* 右上角操作按钮 — 竖排 */}
+        {wo.status === "active" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0, marginLeft: 16 }}>
+            {(role === "admin" || role === "member") && (
+              <button onClick={() => onAddVariant && onAddVariant(wo)} style={btnPrimary}>
+                <Plus size={13} style={{ marginRight: 4 }} />添加方案
+              </button>
+            )}
+            {role === "admin" && (
+              <button onClick={() => onMarkComplete && onMarkComplete(wo)} style={btnSecondary}>
+                定稿
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 对比表 */}
@@ -168,13 +170,26 @@ export default function WoFullPanel({ wo, dims, show, originRect, onClose, onUpd
   );
 }
 
-const btnStyle = {
-  padding: "6px 14px", borderRadius: 8, cursor: "pointer",
+const btnBase = {
+  padding: "7px 16px", borderRadius: 8, cursor: "pointer",
   fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif",
-  fontSize: 13, border: "1px solid rgba(0,0,0,0.08)",
+  fontSize: 13, fontWeight: 500,
+  display: "flex", alignItems: "center", justifyContent: "center",
+  transition: "all 0.15s", whiteSpace: "nowrap",
+};
+
+// 添加方案 — 亮黑色
+const btnPrimary = {
+  ...btnBase,
+  background: "#2d2418", color: "#f5f0e8",
+  border: "1px solid #2d2418",
+};
+
+// 定稿 — 中性灰棕
+const btnSecondary = {
+  ...btnBase,
   background: "rgba(0,0,0,0.04)", color: "#4a4540",
-  display: "flex", alignItems: "center",
-  transition: "all 0.15s",
+  border: "1px solid rgba(0,0,0,0.08)",
 };
 
 /** 按测试员+日期分组评分记录 */
