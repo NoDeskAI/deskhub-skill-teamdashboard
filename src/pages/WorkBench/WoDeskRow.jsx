@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { FONT_MONO, DESK } from "../../constants/theme.js";
 import useDeskRow from "../../hooks/useDeskRow.js";
 import DeskRowShell from "../../components/cards/DeskRowShell.jsx";
@@ -14,9 +15,23 @@ import { avgScore } from "../../utils/helpers.js";
 export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect, onViewAll, onExpandFull }) {
   const sorted = [...wos].sort((a, b) => b.created.localeCompare(a.created));
   const dr = useDeskRow(sorted, wo => wo.id);
+  const detailRef = useRef(null);
 
   const totalVariants = wos.reduce((a, wo) => a + wo.variants.length, 0);
   const highCount = wos.filter(wo => wo.priority === "high").length;
+
+  // 展开详情时捕获弹窗位置作为 originRect
+  const handleExpandFull = (wo) => {
+    const rect = detailRef.current?.getBoundingClientRect();
+    if (onExpandFull) {
+      // 先关闭第二层
+      dr.handleDetailClose();
+      // 延迟后打开第三层，让关闭动画先跑
+      setTimeout(() => {
+        onExpandFull(wo, rect || null);
+      }, 400);
+    }
+  };
 
   return (
     <>
@@ -62,11 +77,11 @@ export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect
 
         renderDetail={() => dr.focusItem && dr.focusPhase === "detail" && (
           <WoDetailPopup
+            ref={detailRef}
             wo={dr.focusItem}
             dims={dims}
             onClose={dr.handleDetailClose}
-            onExpandFull={onExpandFull}
-            onSelect={onSelect}
+            onExpandFull={handleExpandFull}
           />
         )}
       />
@@ -74,8 +89,10 @@ export default function WoDeskRow({ label, labelColor, icon, wos, dims, onSelect
   );
 }
 
+import { forwardRef } from "react";
+
 /** 第二层弹窗 — 方案排名概览 */
-function WoDetailPopup({ wo, dims, onClose, onExpandFull, onSelect }) {
+const WoDetailPopup = forwardRef(function WoDetailPopup({ wo, dims, onClose, onExpandFull }, ref) {
   const activeDims = (dims || []).filter(d => d.active);
 
   // 按均分排序
@@ -89,76 +106,79 @@ function WoDetailPopup({ wo, dims, onClose, onExpandFull, onSelect }) {
 
   return (
     <DetailModal show={true} onClose={onClose} width={380}>
-      <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 16, color: "#3a2a18", lineHeight: 1.5 }}>{wo.name}</div>
-        <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ padding: "2px 7px", background: PRI[wo.priority].bg, borderRadius: 6, fontFamily: FONT_SANS, fontSize: 12, color: PRI[wo.priority].c }}>{PRI[wo.priority].l}</span>
-          <span style={{ padding: "2px 7px", background: wo.type === "skill" ? "rgba(138,106,58,0.12)" : "rgba(90,122,154,0.12)", borderRadius: 6, fontFamily: FONT_SANS, fontSize: 12, color: wo.type === "skill" ? "#8a6a3a" : "#5a7a9a" }}>{wo.type === "skill" ? "Skill" : "MCP"}</span>
-          <span style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#a89a78" }}>{wo.created}</span>
+      <div ref={ref}>
+        <div style={{ padding: "16px 18px 12px", borderBottom: "1px solid rgba(0,0,0,0.06)" }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 16, color: "#3a2a18", lineHeight: 1.5 }}>{wo.name}</div>
+          <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ padding: "2px 7px", background: PRI[wo.priority].bg, borderRadius: 6, fontFamily: FONT_SANS, fontSize: 12, color: PRI[wo.priority].c }}>{PRI[wo.priority].l}</span>
+            <span style={{ padding: "2px 7px", background: wo.type === "skill" ? "rgba(138,106,58,0.12)" : "rgba(90,122,154,0.12)", borderRadius: 6, fontFamily: FONT_SANS, fontSize: 12, color: wo.type === "skill" ? "#8a6a3a" : "#5a7a9a" }}>{wo.type === "skill" ? "Skill" : "MCP"}</span>
+            <span style={{ fontFamily: FONT_SANS, fontSize: 12, color: "#a89a78" }}>{wo.created}</span>
+          </div>
         </div>
-      </div>
 
-      {/* 描述 */}
-      {wo.desc && (
-        <div style={{ padding: "8px 16px", borderBottom: "1px solid rgba(0,0,0,0.05)", fontFamily: FONT_SANS, fontSize: 14, color: "#4a4540", lineHeight: 1.5 }}>
-          {wo.desc}
-        </div>
-      )}
-
-      {/* 方案排名 */}
-      <div style={{ padding: "10px 16px" }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 8 }}>
-          方案概览 ({wo.variants.length})
-        </div>
-        {ranked.length === 0 ? (
-          <div style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#b5a898", padding: "8px 0" }}>暂无方案</div>
-        ) : (
-          ranked.map((v, i) => (
-            <div key={v.id} style={{
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-              padding: "8px 0", borderBottom: i < ranked.length - 1 ? "1px solid rgba(0,0,0,0.04)" : "none",
-            }}>
-              <div>
-                <div style={{ fontFamily: FONT_SANS, fontSize: 14, color: "#3a2a18" }}>
-                  {i === 0 && v.avg > 0 && <span style={{ marginRight: 4 }}>🥇</span>}
-                  {v.name}
-                </div>
-                <div style={{ fontFamily: FONT_SANS, fontSize: 11, color: "#a09888" }}>
-                  {v.uploader} · {v.uploaded}
-                </div>
-              </div>
-              <div style={{
-                fontFamily: FONT_MONO, fontSize: 14,
-                color: v.avg > 0 ? "#3a2a18" : "#b5a898",
-              }}>
-                {v.avg > 0 ? v.avg.toFixed(1) : "待测"}
-              </div>
-            </div>
-          ))
+        {/* 描述 */}
+        {wo.desc && (
+          <div style={{ padding: "10px 18px", borderBottom: "1px solid rgba(0,0,0,0.05)", fontFamily: FONT_SANS, fontSize: 14, color: "#4a4540", lineHeight: 1.6 }}>
+            {wo.desc}
+          </div>
         )}
-      </div>
 
-      {/* 参与人数 */}
-      {testers.size > 0 && (
-        <div style={{ padding: "0 16px 8px", fontFamily: FONT_SANS, fontSize: 11, color: "#a09888" }}>
-          {testers.size} 人参与评测
+        {/* 方案排名 */}
+        <div style={{ padding: "12px 18px" }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: "#5a5550", marginBottom: 10 }}>
+            方案概览 ({wo.variants.length})
+          </div>
+          {ranked.length === 0 ? (
+            <div style={{ fontFamily: FONT_SANS, fontSize: 13, color: "#b5a898", padding: "8px 0" }}>暂无方案</div>
+          ) : (
+            ranked.map((v, i) => (
+              <div key={v.id} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "9px 0", borderBottom: i < ranked.length - 1 ? "1px solid rgba(0,0,0,0.04)" : "none",
+              }}>
+                <div>
+                  <div style={{ fontFamily: FONT_SANS, fontSize: 14, color: "#3a2a18" }}>
+                    {i === 0 && v.avg > 0 && <span style={{ marginRight: 4 }}>🥇</span>}
+                    {v.name}
+                  </div>
+                  <div style={{ fontFamily: FONT_SANS, fontSize: 11, color: "#a09888", marginTop: 2 }}>
+                    {v.uploader} · {v.uploaded}
+                  </div>
+                </div>
+                <div style={{
+                  fontFamily: FONT_MONO, fontSize: 15, fontWeight: 500,
+                  color: v.avg > 0 ? "#3a2a18" : "#c4bfb5",
+                }}>
+                  {v.avg > 0 ? v.avg.toFixed(1) : "待测"}
+                </div>
+              </div>
+            ))
+          )}
         </div>
-      )}
 
-      {/* 展开详情 */}
-      <div
-        onClick={() => { if (onExpandFull) onExpandFull(wo); }}
-        style={{
-          padding: "10px 16px", borderTop: "1px solid rgba(0,0,0,0.05)",
-          textAlign: "center", cursor: "pointer",
-          fontFamily: FONT_SANS, fontSize: 13, color: "#8a7a62",
-          transition: "color 0.15s",
-        }}
-        onMouseEnter={e => e.currentTarget.style.color = "#3a2a18"}
-        onMouseLeave={e => e.currentTarget.style.color = "#8a7a62"}
-      >
-        展开详情 →
+        {/* 参与人数 */}
+        {testers.size > 0 && (
+          <div style={{ padding: "0 18px 10px", fontFamily: FONT_SANS, fontSize: 11, color: "#a09888" }}>
+            {testers.size} 人参与评测
+          </div>
+        )}
+
+        {/* 展开详情 */}
+        <div
+          onClick={() => { if (onExpandFull) onExpandFull(wo); }}
+          style={{
+            padding: "12px 18px", borderTop: "1px solid rgba(0,0,0,0.06)",
+            textAlign: "center", cursor: "pointer",
+            fontFamily: FONT_SANS, fontSize: 13, color: "#8a7a62",
+            fontWeight: 500,
+            transition: "all 0.15s",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = "#3a2a18"; e.currentTarget.style.background = "rgba(0,0,0,0.02)"; }}
+          onMouseLeave={e => { e.currentTarget.style.color = "#8a7a62"; e.currentTarget.style.background = "transparent"; }}
+        >
+          展开详情 →
+        </div>
       </div>
     </DetailModal>
   );
-}
+});

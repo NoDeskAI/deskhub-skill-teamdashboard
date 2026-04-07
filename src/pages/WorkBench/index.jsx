@@ -69,13 +69,11 @@ export default function WorkBench({ plans, setPlans, role }) {
     return groups;
   }, [done]);
 
-  // 展开 FullPanel
-  const handleExpandFull = useCallback(wo => {
-    // 从 plans 取最新数据
+  // 展开 FullPanel（接收可选的 originRect 参数）
+  const handleExpandFull = useCallback((wo, rect) => {
     const latest = plans.find(p => p.id === wo.id) || wo;
     setFullWo(latest);
-    // 简单的默认 originRect（页面中心）
-    setFullOriginRect({ top: window.innerHeight / 2 - 100, left: window.innerWidth / 2 - 150, width: 300, height: 200 });
+    setFullOriginRect(rect || { top: window.innerHeight / 2 - 100, left: window.innerWidth / 2 - 180, width: 360, height: 200 });
     setTimeout(() => setShowFull(true), 50);
   }, [plans]);
 

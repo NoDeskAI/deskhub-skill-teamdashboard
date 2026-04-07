@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { X } from "lucide-react";
-import { PANEL, FONT_SANS } from "../../constants/theme.js";
+import { PANEL } from "../../constants/theme.js";
 
 /**
  * Container Transform 动画壳 — 从 originRect 展开到近全屏
- * @param {{ show: boolean, onClose: ()=>void, originRect: {top,left,width,height}|null, children: ReactNode }} props
+ * 使用 top/left/width/height 动画（非 scale），确保内容正常渲染
  */
 export default function FullPanel({ show, onClose, originRect, children }) {
-  // 阶段：hidden → entering → visible → exiting → hidden
   const [phase, setPhase] = useState("hidden");
 
   useEffect(() => {
@@ -23,16 +22,17 @@ export default function FullPanel({ show, onClose, originRect, children }) {
     }
   }, [show]);
 
-  const handleClose = useCallback(() => {
-    onClose();
-  }, [onClose]);
+  const handleClose = useCallback(() => onClose(), [onClose]);
 
   if (phase === "hidden") return null;
 
   const isExpanded = phase === "visible";
-  const or = originRect || { top: window.innerHeight / 2 - 50, left: window.innerWidth / 2 - 50, width: 100, height: 100 };
+  const or = originRect || {
+    top: window.innerHeight / 2 - 100,
+    left: window.innerWidth / 2 - 180,
+    width: 360, height: 200,
+  };
 
-  // 目标区域：留 40px 边距
   const margin = 40;
   const target = {
     top: margin, left: margin,
@@ -40,11 +40,8 @@ export default function FullPanel({ show, onClose, originRect, children }) {
     height: window.innerHeight - margin * 2,
   };
 
-  // 计算从 origin 到 target 的 transform
-  const scaleX = isExpanded ? target.width / or.width : 1;
-  const scaleY = isExpanded ? target.height / or.height : 1;
-  const translateX = isExpanded ? (target.left + target.width / 2) - (or.left + or.width / 2) : 0;
-  const translateY = isExpanded ? (target.top + target.height / 2) - (or.top + or.height / 2) : 0;
+  // 收起状态用 origin rect，展开状态用 target rect
+  const rect = isExpanded ? target : or;
 
   return (
     <>
@@ -57,47 +54,50 @@ export default function FullPanel({ show, onClose, originRect, children }) {
         pointerEvents: isExpanded ? "auto" : "none",
       }} />
 
-      {/* 主面板 */}
+      {/* 主面板 — 直接动画位置和尺寸 */}
       <div style={{
         position: "fixed",
-        top: or.top, left: or.left,
-        width: or.width, height: or.height,
+        top: rect.top, left: rect.left,
+        width: rect.width, height: rect.height,
         zIndex: PANEL.zIndex,
-        background: PANEL.bg,
+        background: "linear-gradient(180deg, #fdfcfa 0%, #fff 20%)",
         borderRadius: isExpanded ? 16 : PANEL.radius,
-        boxShadow: PANEL.shadow,
-        transform: `translate(${translateX}px, ${translateY}px) scale(${scaleX}, ${scaleY})`,
-        transformOrigin: "center center",
-        transition: PANEL.transition,
+        boxShadow: isExpanded
+          ? "0 4px 8px rgba(0,0,0,0.04), 0 16px 32px rgba(0,0,0,0.1), 0 32px 64px rgba(0,0,0,0.14), inset 0 1px 0 rgba(255,255,255,0.8)"
+          : "0 2px 8px rgba(0,0,0,0.1)",
+        border: "1px solid rgba(0,0,0,0.1)",
         overflow: "hidden",
+        transition: PANEL.transition,
       }}>
-        {/* 内容容器 — 反向 scale 让内容保持正常尺寸 */}
+        {/* 可滚动内容区 */}
         <div style={{
-          width: isExpanded ? target.width : or.width,
-          height: isExpanded ? target.height : or.height,
-          transform: isExpanded ? `scale(${1/scaleX}, ${1/scaleY})` : "none",
-          transformOrigin: "center center",
+          width: "100%", height: "100%",
           overflow: "auto",
           opacity: isExpanded ? 1 : 0,
-          transition: "opacity 0.3s ease 0.15s",
+          transition: "opacity 0.3s ease 0.2s",
         }}>
           {/* 关闭按钮 */}
-          <div onClick={handleClose} style={{
+          <div style={{
             position: "sticky", top: 0, zIndex: 10,
-            display: "flex", justifyContent: "flex-end", padding: "12px 16px 0",
+            display: "flex", justifyContent: "flex-end",
+            padding: "12px 16px 0",
+            background: "linear-gradient(180deg, rgba(253,252,250,0.95) 0%, rgba(253,252,250,0) 100%)",
           }}>
-            <div style={{
+            <div onClick={handleClose} style={{
               width: 32, height: 32, borderRadius: 8,
               display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer", background: "rgba(0,0,0,0.04)",
+              cursor: "pointer",
+              background: "rgba(0,0,0,0.04)",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
               transition: "background 0.15s",
             }}
               onMouseEnter={e => e.currentTarget.style.background = "rgba(0,0,0,0.08)"}
               onMouseLeave={e => e.currentTarget.style.background = "rgba(0,0,0,0.04)"}
             >
-              <X size={16} color="#8a7a62" />
+              <X size={16} color="#8a7a62" strokeWidth={1.5} />
             </div>
           </div>
+
           {/* 子内容 */}
           <div style={{ padding: "0 24px 24px" }}>
             {children}
