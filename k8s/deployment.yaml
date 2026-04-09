@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: teamboard
-          image: nodesk-center-cn-beijing.cr.volces.com/infra/teamboard:20260407211907
+          image: nodesk-center-cn-beijing.cr.volces.com/infra/teamboard:20260408135218
           ports:
             - containerPort: 3001
               protocol: TCP
