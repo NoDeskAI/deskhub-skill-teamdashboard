@@ -48,26 +48,25 @@ export function getSession(userId) {
 }
 
 /**
- * 更新用户会话（追加一轮对话）
+ * 更新用户会话（追加本轮完整消息，包含 tool_use/tool_result）
  * @param {string} userId
- * @param {string} userText - 用户输入
- * @param {string} assistantText - 机器人回复
+ * @param {Array} newMessages - chat() 返回的本轮新增消息数组
  */
-export function updateSession(userId, userText, assistantText) {
+export function updateSession(userId, newMessages) {
+  if (!newMessages || newMessages.length === 0) return;
+
   let session = sessions.get(userId);
   if (!session || Date.now() - session.lastActive > SESSION_TTL) {
     session = { messages: [], lastActive: Date.now() };
     sessions.set(userId, session);
   }
 
-  session.messages.push(
-    { role: 'user', content: userText },
-    { role: 'assistant', content: [{ type: 'text', text: assistantText }] },
-  );
+  session.messages.push(...newMessages);
 
-  // 保留最近 MAX_ROUNDS 轮
-  if (session.messages.length > MAX_ROUNDS * 2) {
-    session.messages = session.messages.slice(-MAX_ROUNDS * 2);
+  // 保留最近 MAX_ROUNDS 轮（按消息条数限制，tool 交互会多几条）
+  const MAX_MESSAGES = MAX_ROUNDS * 4; // 每轮可能有 user + assistant(tool_use) + user(tool_result) + assistant(text)
+  if (session.messages.length > MAX_MESSAGES) {
+    session.messages = session.messages.slice(-MAX_MESSAGES);
   }
 
   session.lastActive = Date.now();

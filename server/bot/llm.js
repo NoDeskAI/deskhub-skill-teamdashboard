@@ -98,11 +98,11 @@ const ERROR_MESSAGE = '抱歉，我暂时无法处理请求，请稍后再试。
  * @param {Array} history - 会话历史 messages 数组
  * @param {Function} [onProgress] - 进度回调: (event) => Promise<void>
  * @param {Object} [boundUser] - 已绑定的用户信息 { username, role, display_name }
- * @returns {Promise<string>} - 模型的最终文本回复
+ * @returns {Promise<{ text: string, newMessages: Array }>} - 回复文本 + 本轮新增的消息（含 tool_use/tool_result）
  */
 export async function chat(userText, history = [], onProgress = null, boundUser = null) {
   const apiKey = process.env.MINIMAX_API_KEY;
-  if (!apiKey) return '[Bot 未配置 MINIMAX_API_KEY]';
+  if (!apiKey) return { text: '[Bot 未配置 MINIMAX_API_KEY]', newMessages: [] };
 
   const model = process.env.MINIMAX_MODEL || 'MiniMax-M2.7';
   const tools = boundUser ? TOOL_DEFINITIONS : TOOL_DEFINITIONS_CHAT_ONLY;
@@ -111,13 +111,17 @@ export async function chat(userText, history = [], onProgress = null, boundUser 
     ...history,
     { role: 'user', content: userText },
   ];
+  const startLen = messages.length;
 
   try {
-    return await toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools);
+    const text = await toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools);
+    // messages 在 toolUseLoop 中被原地追加了 assistant/tool_result 消息
+    const newMessages = messages.slice(startLen);
+    return { text, newMessages };
   } catch (err) {
     console.error('[Bot/LLM] Error:', err.message);
     if (onProgress) await onProgress({ type: 'error', text: ERROR_MESSAGE }).catch(() => {});
-    return ERROR_MESSAGE;
+    return { text: ERROR_MESSAGE, newMessages: [] };
   }
 }
 
