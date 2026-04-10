@@ -303,6 +303,29 @@ export function deleteUser(userId) {
   db.prepare('DELETE FROM users WHERE id = ?').run(userId);
 }
 
+/** 根据飞书 open_id 查找已绑定的平台用户 */
+export function getUserByOpenId(openId) {
+  return db.prepare(
+    "SELECT id, username, role, display_name FROM users WHERE feishu_open_id = ?"
+  ).get(openId) || null;
+}
+
+/** 绑定飞书 open_id 到平台用户（密码验证） */
+export function bindFeishuUser(username, password, openId) {
+  const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+  if (!user) return { ok: false, reason: '用户名不存在' };
+
+  if (!bcrypt.compareSync(password, user.password_hash)) {
+    return { ok: false, reason: '密码错误' };
+  }
+
+  // 一个飞书号只能绑一个平台账号：清除旧绑定
+  db.prepare("UPDATE users SET feishu_open_id = '' WHERE feishu_open_id = ? AND username != ?").run(openId, username);
+
+  db.prepare("UPDATE users SET feishu_open_id = ? WHERE username = ?").run(openId, username);
+  return { ok: true, displayName: user.display_name || username, role: user.role };
+}
+
 // ============================================================
 //  归属查询（供权限检查用）
 // ============================================================

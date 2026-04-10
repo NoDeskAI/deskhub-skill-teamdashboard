@@ -3,14 +3,14 @@
  * Anthropic 兼容接口，原生 fetch，tool use 循环
  */
 
-import { TOOL_DEFINITIONS, executeTool } from './tools.js';
+import { TOOL_DEFINITIONS, TOOL_DEFINITIONS_CHAT_ONLY, executeTool } from './tools.js';
 
 const API_URL = 'https://api.minimaxi.com/anthropic/v1/messages';
 const MAX_TOOL_ROUNDS = 8;
 const REQUEST_TIMEOUT = 30000;
 const MAX_TOKENS = 8192;  // 给复杂回复（周报、多工单对比）留足空间
 
-function buildSystemPrompt() {
+function buildSystemPrompt(boundUser = null) {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
@@ -73,7 +73,11 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 平台助手是你的核心职责，但不是你的全部。有人随便聊你就自然有趣，不敷衍，不强行拉回工作话题。你有自己的想法，表达为"我觉得"而不是"你应该"。好奇心强，偶尔幽默但不刻意。
 
 ## 交互节奏
-需要调用工具时，先说一句简短自然的话，然后调工具。不要机械地说"正在查询"。不需要工具的问题（打招呼、闲聊）直接回答。`;
+需要调用工具时，先说一句简短自然的话，然后调工具。不要机械地说"正在查询"。不需要工具的问题（打招呼、闲聊）直接回答。`
+
+  + (boundUser
+    ? `\n\n## 当前对话用户\n用户名：${boundUser.username}\n显示名：${boundUser.display_name || boundUser.username}\n角色：${{ admin: '管理员', tester: '测试员', member: '成员' }[boundUser.role] || boundUser.role}\n\n你知道在和谁说话。回复时可以自然地称呼对方。通知别人时排除这个人自己。`
+    : `\n\n## 当前对话用户\n未绑定飞书账号的用户。你可以正常聊天，但不要查询平台数据或发送通知。如果对方想使用平台功能，友好地提醒：私聊发送「绑定 用户名 密码」来关联账号。`);
 }
 
 const ERROR_MESSAGE = '抱歉，我暂时无法处理请求，请稍后再试。';
@@ -93,13 +97,15 @@ const ERROR_MESSAGE = '抱歉，我暂时无法处理请求，请稍后再试。
  * @param {string} userText - 用户输入的文本
  * @param {Array} history - 会话历史 messages 数组
  * @param {Function} [onProgress] - 进度回调: (event) => Promise<void>
+ * @param {Object} [boundUser] - 已绑定的用户信息 { username, role, display_name }
  * @returns {Promise<string>} - 模型的最终文本回复
  */
-export async function chat(userText, history = [], onProgress = null) {
+export async function chat(userText, history = [], onProgress = null, boundUser = null) {
   const apiKey = process.env.MINIMAX_API_KEY;
   if (!apiKey) return '[Bot 未配置 MINIMAX_API_KEY]';
 
   const model = process.env.MINIMAX_MODEL || 'MiniMax-M2.7';
+  const tools = boundUser ? TOOL_DEFINITIONS : TOOL_DEFINITIONS_CHAT_ONLY;
 
   const messages = [
     ...history,
@@ -107,7 +113,7 @@ export async function chat(userText, history = [], onProgress = null) {
   ];
 
   try {
-    return await toolUseLoop(apiKey, model, messages, onProgress);
+    return await toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools);
   } catch (err) {
     console.error('[Bot/LLM] Error:', err.message);
     if (onProgress) await onProgress({ type: 'error', text: ERROR_MESSAGE }).catch(() => {});
@@ -115,7 +121,7 @@ export async function chat(userText, history = [], onProgress = null) {
   }
 }
 
-async function toolUseLoop(apiKey, model, messages, onProgress) {
+async function toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools) {
   let thinkingText = '';
   let thinkingEmitted = false;
   const toolSteps = [];   // {name, done}
@@ -125,8 +131,8 @@ async function toolUseLoop(apiKey, model, messages, onProgress) {
     const body = {
       model,
       max_tokens: MAX_TOKENS,
-      system: buildSystemPrompt(),
-      tools: TOOL_DEFINITIONS,
+      system: buildSystemPrompt(boundUser),
+      tools: tools.length > 0 ? tools : undefined,
       messages,
     };
 

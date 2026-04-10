@@ -9,6 +9,7 @@ import { getSession, updateSession, startSessionCleanup } from './session.js';
 import { startChangeDetector } from './change-detector.js';
 import { startPatrol } from './patrol.js';
 import { enqueueMessage } from './concurrency.js';
+import { getUserByOpenId, bindFeishuUser } from '../mcp/db-ops.js';
 import {
   buildThinkingCard,
   buildProgressCard,
@@ -50,7 +51,33 @@ async function handleMessage(text, chatId, userId, chatType) {
   const receiveId = chatType === 'p2p' ? userId : chatId;
   const receiveIdType = chatType === 'p2p' ? 'open_id' : 'chat_id';
 
+  // ── 绑定指令（在排队之前快速响应，密码不经过 LLM）──
+  const bindMatch = text.match(/^绑定\s+(\S+)\s+(\S+)$/);
+  if (bindMatch) {
+    if (chatType !== 'p2p') {
+      await sendCard(receiveId, receiveIdType,
+        buildReplyCard('请私聊我来绑定账号，避免密码泄露~')
+      );
+      return;
+    }
+    const [, username, password] = bindMatch;
+    const result = bindFeishuUser(username, password, userId);
+    if (result.ok) {
+      await sendCard(receiveId, receiveIdType,
+        buildReplyCard(`绑定成功！你好 ${result.displayName}，以后工单有动态我会通知你。`)
+      );
+    } else {
+      await sendCard(receiveId, receiveIdType,
+        buildReplyCard(`绑定失败：${result.reason}。格式：绑定 用户名 密码`)
+      );
+    }
+    return;
+  }
+
   const { status } = await enqueueMessage(userId, async () => {
+    // 查询绑定状态
+    const boundUser = getUserByOpenId(userId);
+
     let cardMessageId = null;
 
     const onProgress = async (event) => {
@@ -109,7 +136,7 @@ async function handleMessage(text, chatId, userId, chatType) {
 
     try {
       const history = getSession(userId);
-      const reply = await chat(text, history, onProgress);
+      const reply = await chat(text, history, onProgress, boundUser);
       updateSession(userId, text, reply);
     } catch (err) {
       console.error('[Bot] 消息处理错误:', err);

@@ -112,6 +112,9 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
+// 闲聊工具集（未绑定用户）— 不含平台数据查询和通知
+export const TOOL_DEFINITIONS_CHAT_ONLY = [];
+
 // ── 工具执行器 ──
 
 export async function executeTool(name, input = {}) {
