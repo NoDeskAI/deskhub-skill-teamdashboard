@@ -282,6 +282,89 @@ export function buildNotificationCard(changes) {
   };
 }
 
+// ============================================================
+//  LLM 生成的个性化通知卡片
+// ============================================================
+
+/**
+ * LLM 生成的群聊通知卡片
+ */
+export function buildLLMNotificationCard(message, changeCount) {
+  const now = new Date();
+  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: `DeskHub 工作台更新 (${changeCount} 项)` },
+      icon: HEADER_ICON_NOTIFY,
+      template: HEADER_COLORS.info,
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', content: message },
+        { tag: 'hr' },
+        {
+          tag: 'note',
+          elements: [{ tag: 'plain_text', content: `${timeStr} | 小合整理` }],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * 个人私聊通知卡片（send_notification 工具用）
+ */
+export function buildPersonalNotificationCard(message) {
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: 'DeskHub 工作台提醒' },
+      icon: HEADER_ICON_NOTIFY,
+      template: HEADER_COLORS.info,
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', content: message },
+      ],
+    },
+  };
+}
+
+/**
+ * 巡检结果卡片
+ */
+export function buildPatrolCard(message) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  return {
+    schema: '2.0',
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: `DeskHub 每日巡检 — ${today}` },
+      icon: HEADER_ICON_NOTIFY,
+      template: HEADER_COLORS.summary,
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', content: message },
+        { tag: 'hr' },
+        {
+          tag: 'note',
+          elements: [{ tag: 'plain_text', content: '小合每日巡检' }],
+        },
+      ],
+    },
+  };
+}
+
+// ============================================================
+//  旧版模板通知（LLM 失败时兜底）
+// ============================================================
+
 export function buildDailySummaryCard(changes) {
   const byType = { plan: [], variant: [], score: [] };
   for (const c of changes) {

@@ -1,19 +1,26 @@
 /**
- * 变更检测 + 推送
- * 三级策略：高优即推 / 中低累积 3 条 / 每天 11:00 兜底
+ * 变更检测 + LLM 驱动推送
+ *
+ * 不再轮询 —— 由 event-bus 的 EventEmitter 驱动：
+ *   logChange() → bus.emit('change') → 缓冲区收集 → flush → 本模块处理
+ *
+ * 本模块职责：
+ *   1. 注册 flush 回调
+ *   2. 调用 LLM 分析变更 → 获得通知决策
+ *   3. 按决策发送群聊/私聊通知
+ *   4. 标记 change_log 已推送
+ *   5. 每日汇总（定时检查，复用巡检）
  */
 
 import db from '../db/init.js';
 import { sendCard, getFeishuOpenIds } from './feishu.js';
-import { buildNotificationCard, buildDailySummaryCard } from './card-templates.js';
-
-const POLL_INTERVAL = Number(process.env.BOT_POLL_INTERVAL) || 30000;
-const BATCH_THRESHOLD = Number(process.env.BOT_BATCH_THRESHOLD) || 3;
-const DAILY_HOUR = Number(process.env.BOT_DAILY_SUMMARY_HOUR) || 11;
-
-let pollTimer = null;
-let dailyCheckTimer = null;
-let lastDailySummaryDate = '';
+import { setFlushHandler } from './event-bus.js';
+import { analyzeChanges, fallbackNotify } from './notify-llm.js';
+import {
+  buildLLMNotificationCard,
+  buildPersonalNotificationCard,
+  buildNotificationCard,
+} from './card-templates.js';
 
 /**
  * 启动变更检测
@@ -23,97 +30,42 @@ export function startChangeDetector() {
   const stale = db.prepare('SELECT COUNT(*) AS c FROM change_log WHERE notified = 0').get();
   if (stale.c > 0) {
     db.prepare('UPDATE change_log SET notified = 1 WHERE notified = 0').run();
-    console.log(`[Bot/Detector] 跳过 ${stale.c} 条历史未推送记录（避免启动推送风暴）`);
+    console.log(`[Detector] 跳过 ${stale.c} 条历史未推送记录（避免启动推送风暴）`);
   }
 
-  pollTimer = setInterval(poll, POLL_INTERVAL);
-  pollTimer.unref?.();
+  // 注册 EventBus flush 回调
+  setFlushHandler(handleBatch);
 
-  // 每分钟检查是否到每日汇总时间
-  dailyCheckTimer = setInterval(checkDailySummary, 60000);
-  dailyCheckTimer.unref?.();
-
-  console.log(`[Bot/Detector] 变更检测已启动 (轮询 ${POLL_INTERVAL / 1000}s, 每日汇总 ${DAILY_HOUR}:00)`);
-}
-
-export function stopChangeDetector() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  if (dailyCheckTimer) { clearInterval(dailyCheckTimer); dailyCheckTimer = null; }
+  console.log('[Detector] 变更检测已启动（EventEmitter 模式）');
 }
 
 /**
- * 轮询变更
+ * 处理一批变更（由 EventBus flush 触发）
  */
-async function poll() {
+async function handleBatch(batch) {
+  console.log(`[Detector] 处理 ${batch.length} 条变更`);
+
+  let decision;
   try {
-    const pending = db.prepare(
-      'SELECT * FROM change_log WHERE notified = 0 ORDER BY created_at ASC'
-    ).all();
-
-    if (pending.length === 0) return;
-
-    const high = pending.filter(c => c.priority === 'high');
-    const rest = pending.filter(c => c.priority !== 'high');
-
-    // 高优先级立即推送
-    if (high.length > 0) {
-      await pushChanges(high);
-    }
-
-    // 中低优先级累积到阈值
-    if (rest.length >= BATCH_THRESHOLD) {
-      await pushChanges(rest);
-    }
+    decision = await analyzeChanges(batch);
   } catch (err) {
-    console.error('[Bot/Detector] 轮询错误:', err.message);
+    console.error('[Detector] LLM 决策失败，使用兜底:', err.message);
+    decision = fallbackNotify(batch);
   }
-}
 
-/**
- * 每日汇总检查
- */
-async function checkDailySummary() {
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-
-  if (now.getHours() !== DAILY_HOUR) return;
-  if (lastDailySummaryDate === today) return;
-  lastDailySummaryDate = today;
-
-  try {
-    const pending = db.prepare(
-      'SELECT * FROM change_log WHERE notified = 0 ORDER BY created_at ASC'
-    ).all();
-
-    if (pending.length === 0) return;
-
-    // 用每日汇总卡片
-    const card = buildDailySummaryCard(pending);
+  // 群聊通知
+  if (decision.group?.send && decision.group.message) {
+    const card = buildLLMNotificationCard(decision.group.message, batch.length);
     await sendToGroups(card);
-
-    // 标记已推送
-    markNotified(pending.map(c => c.id));
-    console.log(`[Bot/Detector] 每日汇总已推送 (${pending.length} 条)`);
-  } catch (err) {
-    console.error('[Bot/Detector] 每日汇总错误:', err.message);
   }
-}
 
-/**
- * 推送变更（群聊 + 私聊）
- */
-async function pushChanges(changes) {
-  const card = buildNotificationCard(changes);
+  // 个性化私聊
+  if (decision.individuals?.length > 0) {
+    await sendToIndividuals(decision.individuals);
+  }
 
-  // 推送到群聊
-  await sendToGroups(card);
-
-  // 推送到相关人私聊
-  await sendToRelatedUsers(changes, card);
-
-  // 标记已推送
-  markNotified(changes.map(c => c.id));
-  console.log(`[Bot/Detector] 已推送 ${changes.length} 条变更`);
+  // 标记 change_log 已推送（用 entity_id 匹配最近记录）
+  markNotifiedByBatch(batch);
 }
 
 /**
@@ -131,31 +83,38 @@ async function sendToGroups(card) {
 }
 
 /**
- * 推送私聊通知给相关用户
+ * 发送个性化私聊通知
  */
-async function sendToRelatedUsers(changes, card) {
-  // 收集所有需通知的 username（去重）
-  const usernameSet = new Set();
-  for (const c of changes) {
-    try {
-      const users = JSON.parse(c.related_users || '[]');
-      for (const u of users) usernameSet.add(u);
-    } catch { /* ignore */ }
-  }
+async function sendToIndividuals(individuals) {
+  const usernames = individuals.map(i => i.username);
+  const mappings = getFeishuOpenIds(usernames);
+  const openIdMap = Object.fromEntries(mappings.map(m => [m.username, m.openId]));
 
-  if (usernameSet.size === 0) return;
-
-  const mappings = getFeishuOpenIds([...usernameSet]);
-  for (const { openId } of mappings) {
+  for (const { username, message } of individuals) {
+    const openId = openIdMap[username];
+    if (!openId) {
+      console.warn(`[Detector] 用户 ${username} 无飞书绑定，跳过私聊`);
+      continue;
+    }
+    const card = buildPersonalNotificationCard(message);
     await sendCard(openId, 'open_id', card);
   }
 }
 
 /**
  * 标记 change_log 记录为已推送
+ * EventBus 传来的 batch 没有 DB id，用最近的未推送记录匹配
  */
-function markNotified(ids) {
-  if (ids.length === 0) return;
-  const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`UPDATE change_log SET notified = 1 WHERE id IN (${placeholders})`).run(...ids);
+function markNotifiedByBatch(batch) {
+  // 标记最近 N 条未推送的记录
+  const count = batch.length;
+  const rows = db.prepare(
+    'SELECT id FROM change_log WHERE notified = 0 ORDER BY created_at ASC LIMIT ?'
+  ).all(count);
+
+  if (rows.length > 0) {
+    const ids = rows.map(r => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    db.prepare(`UPDATE change_log SET notified = 1 WHERE id IN (${placeholders})`).run(...ids);
+  }
 }

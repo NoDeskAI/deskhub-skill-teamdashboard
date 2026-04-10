@@ -10,6 +10,9 @@ import {
   listDeskhubSkills, getDeskhubSkill,
   getUmamiStats, getUmamiActive,
 } from '../mcp/proxy-ops.js';
+import db from '../db/init.js';
+import { sendCard } from './feishu.js';
+import { buildPersonalNotificationCard } from './card-templates.js';
 
 // ── 工具定义（Anthropic / MiniMax 兼容格式）──
 
@@ -95,6 +98,18 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    name: 'send_notification',
+    description: '给团队成员发送飞书私聊消息。只能发给 users 表中已注册且绑定了飞书的成员。这是小合的唯一写能力。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        target_username: { type: 'string', description: '目标用户的 username' },
+        message: { type: 'string', description: '消息内容（支持 markdown）' },
+      },
+      required: ['target_username', 'message'],
+    },
+  },
 ];
 
 // ── 工具执行器 ──
@@ -131,6 +146,31 @@ export async function executeTool(name, input = {}) {
 
     case 'get_recent_changes':
       return getRecentChanges(input.limit || 20);
+
+    case 'send_notification': {
+      const { target_username, message } = input;
+      if (!target_username || !message) {
+        return { sent: false, reason: 'target_username 和 message 必填' };
+      }
+
+      // 校验目标用户存在且有飞书绑定
+      const user = db.prepare(
+        "SELECT username, feishu_open_id, display_name FROM users WHERE username = ?"
+      ).get(target_username);
+
+      if (!user) {
+        return { sent: false, reason: `用户 ${target_username} 不存在` };
+      }
+      if (!user.feishu_open_id) {
+        return { sent: false, reason: `用户 ${target_username} 未绑定飞书` };
+      }
+
+      // 发送个性化通知卡片
+      const card = buildPersonalNotificationCard(message);
+      await sendCard(user.feishu_open_id, 'open_id', card);
+
+      return { sent: true, target: target_username, displayName: user.display_name };
+    }
 
     default:
       throw new Error(`未知工具: ${name}`);

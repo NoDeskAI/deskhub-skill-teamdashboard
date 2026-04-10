@@ -7,6 +7,7 @@ import { initFeishu, sendCardGetId, updateCard, sendCard } from './feishu.js';
 import { chat } from './llm.js';
 import { getSession, updateSession, startSessionCleanup } from './session.js';
 import { startChangeDetector } from './change-detector.js';
+import { startPatrol } from './patrol.js';
 import {
   buildThinkingCard,
   buildProgressCard,
@@ -29,6 +30,7 @@ export async function startBot() {
   const feishuReady = await initFeishu(handleMessage);
 
   startChangeDetector();
+  startPatrol();
 
   if (feishuReady) {
     console.log('[Bot] 飞书机器人已启动');
