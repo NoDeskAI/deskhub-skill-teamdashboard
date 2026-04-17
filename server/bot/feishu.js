@@ -185,7 +185,26 @@ export async function sendText(receiveId, receiveIdType, text) {
 //  - 卡片实体（card_id）独立于消息存在，14 天有效
 //  - streaming_mode 下文本更新走打字机效果，不计 QPS 上限
 //  - 所有更新需带 sequence（严格递增）和 uuid（幂等）
+//
+//  ⚠️ lark SDK 的 response interceptor 仅返回 resp.data，不检查 code !== 0。
+//     调用 API 失败（业务错误码）时不抛异常，必须手动校验 code。
+//     用 ensureOk() 统一处理。
 // ============================================================
+
+/**
+ * 校验飞书 API 响应：code === 0 为成功，否则抛异常带详细信息
+ * lark SDK 不会自动抛 code !== 0 的业务错误
+ */
+function ensureOk(label, res) {
+  if (res && res.code !== undefined && res.code !== 0) {
+    const err = new Error(`${label}: code=${res.code} msg=${res.msg || 'unknown'}`);
+    err.feishuCode = res.code;
+    err.feishuMsg = res.msg;
+    err.feishuData = res.data;
+    throw err;
+  }
+  return res;
+}
 
 /**
  * 创建卡片实体
@@ -201,9 +220,10 @@ export async function createCardEntity(cardJson) {
         data: JSON.stringify(cardJson),
       },
     });
+    ensureOk('createCardEntity', res);
     const cardId = res?.data?.card_id || null;
     if (!cardId) {
-      console.error('[Bot/Feishu] 创建卡片实体失败：返回 card_id 为空', res);
+      console.error('[Bot/Feishu] 创建卡片实体失败：返回 card_id 为空', JSON.stringify(res));
     }
     return cardId;
   } catch (err) {
@@ -230,6 +250,7 @@ export async function sendCardById(receiveId, receiveIdType, cardId) {
         content: JSON.stringify({ type: 'card', data: { card_id: cardId } }),
       },
     });
+    ensureOk('sendCardById', res);
     return res?.data?.message_id || null;
   } catch (err) {
     console.error('[Bot/Feishu] 发送卡片实体失败:', err.message);
@@ -259,7 +280,7 @@ export async function createAndSendCard(receiveId, receiveIdType, cardJson) {
 export async function streamCardText(cardId, elementId, content) {
   if (!client || !cardId || !elementId) return false;
   try {
-    await client.cardkit.v1.cardElement.content({
+    const res = await client.cardkit.v1.cardElement.content({
       path: { card_id: cardId, element_id: elementId },
       data: {
         uuid: uuid(),
@@ -267,6 +288,7 @@ export async function streamCardText(cardId, elementId, content) {
         sequence: nextSeq(cardId),
       },
     });
+    ensureOk(`streamCardText(${elementId})`, res);
     return true;
   } catch (err) {
     console.error(`[Bot/Feishu] 流式推文本失败 (${elementId}):`, err.message);
@@ -285,7 +307,7 @@ export async function streamCardText(cardId, elementId, content) {
 export async function insertCardElements(cardId, elements, { type = 'append', targetElementId } = {}) {
   if (!client || !cardId) return false;
   try {
-    await client.cardkit.v1.cardElement.create({
+    const res = await client.cardkit.v1.cardElement.create({
       path: { card_id: cardId },
       data: {
         uuid: uuid(),
@@ -295,9 +317,11 @@ export async function insertCardElements(cardId, elements, { type = 'append', ta
         elements: JSON.stringify(elements),
       },
     });
+    ensureOk(`insertCardElements(${type}@${targetElementId || 'append'})`, res);
     return true;
   } catch (err) {
     console.error(`[Bot/Feishu] 插入组件失败 (${type}@${targetElementId || 'append'}):`, err.message);
+    if (err.feishuData) console.error('  详情:', JSON.stringify(err.feishuData).slice(0, 300));
     return false;
   }
 }
@@ -309,7 +333,7 @@ export async function insertCardElements(cardId, elements, { type = 'append', ta
 export async function patchCardElement(cardId, elementId, partial) {
   if (!client || !cardId || !elementId) return false;
   try {
-    await client.cardkit.v1.cardElement.patch({
+    const res = await client.cardkit.v1.cardElement.patch({
       path: { card_id: cardId, element_id: elementId },
       data: {
         uuid: uuid(),
@@ -317,6 +341,7 @@ export async function patchCardElement(cardId, elementId, partial) {
         partial_element: JSON.stringify(partial),
       },
     });
+    ensureOk(`patchCardElement(${elementId})`, res);
     return true;
   } catch (err) {
     console.error(`[Bot/Feishu] patch 组件失败 (${elementId}):`, err.message);
@@ -330,7 +355,7 @@ export async function patchCardElement(cardId, elementId, partial) {
 export async function updateCardElement(cardId, elementId, element) {
   if (!client || !cardId || !elementId) return false;
   try {
-    await client.cardkit.v1.cardElement.update({
+    const res = await client.cardkit.v1.cardElement.update({
       path: { card_id: cardId, element_id: elementId },
       data: {
         uuid: uuid(),
@@ -338,6 +363,7 @@ export async function updateCardElement(cardId, elementId, element) {
         element: JSON.stringify(element),
       },
     });
+    ensureOk(`updateCardElement(${elementId})`, res);
     return true;
   } catch (err) {
     console.error(`[Bot/Feishu] 全量更新组件失败 (${elementId}):`, err.message);
@@ -351,13 +377,14 @@ export async function updateCardElement(cardId, elementId, element) {
 export async function deleteCardElement(cardId, elementId) {
   if (!client || !cardId || !elementId) return false;
   try {
-    await client.cardkit.v1.cardElement.delete({
+    const res = await client.cardkit.v1.cardElement.delete({
       path: { card_id: cardId, element_id: elementId },
       data: {
         uuid: uuid(),
         sequence: nextSeq(cardId),
       },
     });
+    ensureOk(`deleteCardElement(${elementId})`, res);
     return true;
   } catch (err) {
     console.error(`[Bot/Feishu] 删除组件失败 (${elementId}):`, err.message);
@@ -371,7 +398,7 @@ export async function deleteCardElement(cardId, elementId) {
 export async function updateCardEntity(cardId, cardJson) {
   if (!client || !cardId) return false;
   try {
-    await client.cardkit.v1.card.update({
+    const res = await client.cardkit.v1.card.update({
       path: { card_id: cardId },
       data: {
         uuid: uuid(),
@@ -379,6 +406,7 @@ export async function updateCardEntity(cardId, cardJson) {
         card: { type: 'card_json', data: JSON.stringify(cardJson) },
       },
     });
+    ensureOk('updateCardEntity', res);
     return true;
   } catch (err) {
     console.error('[Bot/Feishu] 全量更新卡片失败:', err.message);
@@ -394,7 +422,7 @@ export async function updateCardEntity(cardId, cardJson) {
 export async function updateCardSettings(cardId, settings) {
   if (!client || !cardId) return false;
   try {
-    await client.cardkit.v1.card.settings({
+    const res = await client.cardkit.v1.card.settings({
       path: { card_id: cardId },
       data: {
         uuid: uuid(),
@@ -402,6 +430,7 @@ export async function updateCardSettings(cardId, settings) {
         settings: JSON.stringify(settings),
       },
     });
+    ensureOk('updateCardSettings', res);
     return true;
   } catch (err) {
     console.error('[Bot/Feishu] 更新卡片配置失败:', err.message);
