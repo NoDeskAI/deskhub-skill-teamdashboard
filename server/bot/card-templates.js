@@ -108,7 +108,7 @@ export function buildThinkingPanel() {
       header: {
         title: { tag: 'plain_text', content: '💭 思考中…' },
         vertical_align: 'center',
-        padding: '4px 8px',
+        padding: '4px 8px 4px 8px',
         icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
         icon_position: 'right',
         icon_expanded_angle: -180,
@@ -131,7 +131,7 @@ export const THINKING_PANEL_DONE_PATCH = {
   header: {
     title: { tag: 'plain_text', content: '💭 思考过程' },
     vertical_align: 'center',
-    padding: '4px 8px',
+    padding: '4px 8px 4px 8px',
     icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
     icon_position: 'right',
     icon_expanded_angle: -180,
@@ -154,7 +154,7 @@ export function buildToolPanel() {
       header: {
         title: { tag: 'plain_text', content: '🔧 工具执行中…' },
         vertical_align: 'center',
-        padding: '4px 8px',
+        padding: '4px 8px 4px 8px',
         icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
         icon_position: 'right',
         icon_expanded_angle: -180,
@@ -179,7 +179,7 @@ export function buildToolPanelDonePatch(toolCount) {
     header: {
       title: { tag: 'plain_text', content: `🔧 已使用 ${toolCount} 个工具` },
       vertical_align: 'center',
-      padding: '4px 8px',
+      padding: '4px 8px 4px 8px',
       icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
       icon_position: 'right',
       icon_expanded_angle: -180,
