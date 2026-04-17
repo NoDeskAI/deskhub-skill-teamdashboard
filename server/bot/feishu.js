@@ -12,11 +12,14 @@ let botOpenId = null;
 
 // ── CardKit sequence 管理 ──
 // 飞书要求每个 card_id 的更新 sequence 严格递增
+// Map<cardId, { seq, lastAccess }>，按 lastAccess 时间清理（不按 seq 数值）
 const cardSequences = new Map();
+const SEQ_IDLE_TTL = 3 * 60 * 60 * 1000;  // 3 小时未访问则清理
 
 function nextSeq(cardId) {
-  const cur = (cardSequences.get(cardId) || 0) + 1;
-  cardSequences.set(cardId, cur);
+  const entry = cardSequences.get(cardId);
+  const cur = (entry?.seq || 0) + 1;
+  cardSequences.set(cardId, { seq: cur, lastAccess: Date.now() });
   return cur;
 }
 
@@ -24,13 +27,14 @@ function uuid() {
   return crypto.randomUUID();
 }
 
-// 卡片实体最长 14 天有效，定时清理 sequence 表防止内存泄漏
-setInterval(() => {
-  // 简单粗暴：sequence 超过 1000 的 card 清理掉（流式聊天不会用到这么多）
-  for (const [cid, seq] of cardSequences.entries()) {
-    if (seq > 1000) cardSequences.delete(cid);
+// 定时按 idle 时间清理（一次性卡片 seq 永远是 1，按数值清理永远不会触发）
+const seqCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [cid, entry] of cardSequences.entries()) {
+    if (now - entry.lastAccess > SEQ_IDLE_TTL) cardSequences.delete(cid);
   }
-}, 60 * 60 * 1000);  // 每小时
+}, 30 * 60 * 1000);  // 每 30 分钟扫一次
+seqCleanupTimer.unref?.();
 
 // 消息去重（message_id / event_id 级别，防飞书事件重发）
 // per-user 串行化由 concurrency.js 的 mutex 负责

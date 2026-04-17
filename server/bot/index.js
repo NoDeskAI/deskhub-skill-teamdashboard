@@ -71,18 +71,26 @@ export async function startBot() {
 // ============================================================
 
 class ChatCardStreamer {
-  constructor(receiveId, receiveIdType) {
+  /**
+   * @param {string} receiveId
+   * @param {string} receiveIdType
+   * @param {object} [opts]
+   * @param {string} [opts.presetCardId] - 收到消息时已预创建的 cardId（TTFP 优化）
+   * @param {string} [opts.presetMessageId]
+   */
+  constructor(receiveId, receiveIdType, { presetCardId = null, presetMessageId = null } = {}) {
     this.receiveId = receiveId;
     this.receiveIdType = receiveIdType;
-    this.cardId = null;
-    this.messageId = null;
+    this.cardId = presetCardId;
+    this.messageId = presetMessageId;
 
     this.runningText = '';        // 当前轮答案，轮间重置
     this.runningThinking = '';    // 全局思考链
     this.currentToolSteps = [];
 
     // ── Promise 备忘锁，防止并发 chunk 重复触发 insert/patch ──
-    this._cardPromise = null;
+    // 预创建场景：cardId 已就绪，把 _cardPromise 设为已 resolve，让 ensureCardCreated 直接返回
+    this._cardPromise = presetCardId ? Promise.resolve() : null;
     this._thinkingPanelPromise = null;
     this._toolPanelPromise = null;
     this._thinkingCollapsePromise = null;
@@ -103,61 +111,65 @@ class ChatCardStreamer {
     return next;
   }
 
+  /**
+   * 备忘锁辅助：promise 失败时自动清空，下个调用可重试，避免死锁
+   */
+  _memoize(slot, factory) {
+    if (this[slot]) return this[slot];
+    const p = factory().catch(err => {
+      // 失败时清空备忘，下次调用从头来过
+      if (this[slot] === p) this[slot] = null;
+      throw err;
+    });
+    this[slot] = p;
+    return p;
+  }
+
   async ensureCardCreated() {
-    if (!this._cardPromise) {
-      this._cardPromise = (async () => {
-        const cid = await createCardEntity(buildChatCardInitial());
-        if (!cid) throw new Error('createCardEntity 返回 null');
-        this.cardId = cid;
-        this.messageId = await sendCardById(this.receiveId, this.receiveIdType, cid);
-        console.log(`[Bot/Stream] 卡片已创建 cardId=${cid}`);
-      })();
-    }
-    return this._cardPromise;
+    return this._memoize('_cardPromise', async () => {
+      const cid = await createCardEntity(buildChatCardInitial());
+      if (!cid) throw new Error('createCardEntity 返回 null');
+      this.cardId = cid;
+      this.messageId = await sendCardById(this.receiveId, this.receiveIdType, cid);
+      console.log(`[Bot/Stream] 卡片已创建 cardId=${cid}`);
+    });
   }
 
   async ensureThinkingPanel() {
-    if (!this._thinkingPanelPromise) {
-      this._thinkingPanelPromise = (async () => {
-        await this.ensureCardCreated();
-        await this._enqueue('insert thinking_panel', async () => {
-          await insertCardElements(this.cardId, buildThinkingPanel(), {
-            type: 'insert_before',
-            targetElementId: 'main_text',
-          });
-          console.log('[Bot/Stream] thinking_panel 已插入');
+    return this._memoize('_thinkingPanelPromise', async () => {
+      await this.ensureCardCreated();
+      await this._enqueue('insert thinking_panel', async () => {
+        await insertCardElements(this.cardId, buildThinkingPanel(), {
+          type: 'insert_before',
+          targetElementId: 'main_text',
         });
-      })();
-    }
-    return this._thinkingPanelPromise;
+        console.log('[Bot/Stream] thinking_panel 已插入');
+      });
+    });
   }
 
   async ensureToolPanel() {
-    if (!this._toolPanelPromise) {
-      this._toolPanelPromise = (async () => {
-        await this.ensureCardCreated();
-        await this._enqueue('insert tool_panel', async () => {
-          await insertCardElements(this.cardId, buildToolPanel(), {
-            type: 'insert_before',
-            targetElementId: 'main_text',
-          });
-          console.log('[Bot/Stream] tool_panel 已插入');
+    return this._memoize('_toolPanelPromise', async () => {
+      await this.ensureCardCreated();
+      await this._enqueue('insert tool_panel', async () => {
+        await insertCardElements(this.cardId, buildToolPanel(), {
+          type: 'insert_before',
+          targetElementId: 'main_text',
         });
-      })();
-    }
-    return this._toolPanelPromise;
+        console.log('[Bot/Stream] tool_panel 已插入');
+      });
+    });
   }
 
   async collapseThinking() {
-    if (!this._thinkingPanelPromise || this._thinkingCollapsePromise) return;
-    this._thinkingCollapsePromise = (async () => {
+    if (!this._thinkingPanelPromise) return;
+    return this._memoize('_thinkingCollapsePromise', async () => {
       await this._thinkingPanelPromise;  // 等面板真正存在
       await this._enqueue('collapse thinking_panel', async () => {
         await patchCardElement(this.cardId, 'thinking_panel', THINKING_PANEL_DONE_PATCH);
         console.log('[Bot/Stream] thinking_panel 已收起');
       });
-    })();
-    return this._thinkingCollapsePromise;
+    });
   }
 
   // ── 节流推送 ──
@@ -322,7 +334,27 @@ async function handleMessage(text, chatId, userId, chatType) {
 
   const { status } = await enqueueMessage(userId, async () => {
     const boundUser = getUserByOpenId(userId);
-    const streamer = new ChatCardStreamer(receiveId, receiveIdType);
+
+    // ── TTFP 优化：消息进入处理前，先把空卡片推到飞书 ──
+    // 用户在 LLM 响应前（2-7 秒 TTFT）就能看到"小合正在思考..."摘要，立刻有反馈。
+    // 失败则降级到 lazy 创建（首个 chunk 触发，与之前行为一致）。
+    let presetCardId = null;
+    let presetMessageId = null;
+    try {
+      const { cardId, messageId } = await createAndSendCard(
+        receiveId, receiveIdType, buildChatCardInitial()
+      );
+      presetCardId = cardId;
+      presetMessageId = messageId;
+      if (cardId) console.log(`[Bot/Stream] 卡片预创建 cardId=${cardId}`);
+    } catch (err) {
+      console.warn('[Bot] 卡片预创建失败，降级到首个 chunk 触发:', err.message);
+    }
+
+    const streamer = new ChatCardStreamer(receiveId, receiveIdType, {
+      presetCardId,
+      presetMessageId,
+    });
 
     const onProgress = async (event) => {
       try {

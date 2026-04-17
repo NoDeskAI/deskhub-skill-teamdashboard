@@ -139,7 +139,8 @@ export async function runAgentLoop(opts) {
 
     // ── 执行工具 ──
     const toolUseBlocks = final.content.filter(b => b.type === 'tool_use');
-    const newSteps = toolUseBlocks.map(b => ({ name: b.name, done: false }));
+    // 用 block.id 唯一标识每个 step；name 不唯一（同名工具多次调用时会碰撞）
+    const newSteps = toolUseBlocks.map(b => ({ name: b.name, blockId: b.id, done: false }));
     toolSteps.push(...newSteps);
 
     if (onToolStart) await onToolStart(toolSteps);
@@ -168,8 +169,8 @@ export async function runAgentLoop(opts) {
       const inputBrief = JSON.stringify(block.input).slice(0, 80);
       toolSummaries.push(`${block.name}(${inputBrief}) → ${isError ? '失败' : '成功'}`);
 
-      // 标记本步完成
-      const step = toolSteps.find(s => s.name === block.name && !s.done);
+      // 用 block.id 精确定位（同名工具多次调用也能正确标记）
+      const step = toolSteps.find(s => s.blockId === block.id);
       if (step) step.done = true;
     }
 
