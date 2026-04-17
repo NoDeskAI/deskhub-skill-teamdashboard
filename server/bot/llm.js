@@ -1,28 +1,40 @@
 /**
- * MiniMax M2.7 调用层
- * Anthropic 兼容接口，原生 fetch，SSE 流式，tool use 循环
+ * 聊天 LLM 调用层
+ * 走 @anthropic-ai/sdk → MiniMax Anthropic 兼容端点
  *
- * 流式说明：
- * - 请求体带 stream: true，按 Anthropic SSE 协议解析事件
- * - text_delta / thinking_delta 增量回调（text_chunk / thinking_chunk 事件）
- * - input_json_delta 累积成完整 input，与非流式 content 结构对齐
- * - 流结束后产出 { content, stop_reason, usage }，后续 toolUseLoop 逻辑零改动
+ * 特性：
+ *   - 流式（text + thinking + input_json）
+ *   - 交错思考（interleaved-thinking-2025-05-14 beta 头）：模型可在多轮工具调用之间持续推理
+ *   - prompt caching：静态 system prompt + tools 入 cache（5min TTL，命中价 ×0.1）
+ *   - 8 轮 tool use 上限
+ *
+ * 进度事件回调（onProgress）：
+ *   { type: 'text_chunk',     delta }
+ *   { type: 'thinking_chunk', delta }
+ *   { type: 'tool_start',     tools, toolSteps }
+ *   { type: 'tool_done',      tools, toolSteps }
+ *   { type: 'complete',       text, toolSteps }
+ *   { type: 'direct_reply',   text }
+ *   { type: 'error',          text }
  */
 
-import { TOOL_DEFINITIONS, TOOL_DEFINITIONS_CHAT_ONLY, executeTool } from './tools.js';
+import { TOOL_DEFINITIONS, TOOL_DEFINITIONS_CHAT_ONLY, executeTool, withToolsCache } from './tools.js';
+import { runAgentLoop, ERROR_TEXT } from './agent-loop.js';
 
-const API_URL = 'https://api.minimaxi.com/anthropic/v1/messages';
 const MAX_TOOL_ROUNDS = 8;
-const REQUEST_TIMEOUT = 60000;  // 流式整体读取上限
-const MAX_TOKENS = 8192;  // 给复杂回复（周报、多工单对比）留足空间
+const MAX_TOKENS = 8192;
+const THINKING_BUDGET = 2000;   // thinking token 预算（不计入 max_tokens）
 
-function buildSystemPrompt(boundUser = null, toolLog = []) {
-  const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const nowMs = now.getTime();
-  return `你是小合，DeskSkill TeamBoard 的协作中枢——团队里的第五个人。
+// ============================================================
+//  System Prompt（静态部分可缓存，动态部分追加在后）
+// ============================================================
 
-当前时间：${today}（毫秒时间戳 ${nowMs}）。
+/**
+ * 静态部分：人格、价值观、规则——所有对话共用，cache_control 候选
+ * 改这段会让缓存失效，所以把"会变"的内容（toolLog / boundUser / 当前时间）
+ * 单独放在 dynamic 段
+ */
+const STATIC_SYSTEM_PROMPT = `你是小合，DeskSkill TeamBoard 的协作中枢——团队里的第五个人。
 
 ## 你的价值观
 
@@ -67,7 +79,8 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 
 ## 回复格式
 中文、Markdown。粗体标关键信息，emoji 标类型（🟢🔵🟡🔴）。列表优于段落。
-重要：不要使用 Markdown 表格（| col | col | 语法），飞书卡片不支持渲染表格。
+卡片支持表格（| col | col | 语法），适合方案评分对比、工单列表等场景，最多 5 行后分页。
+也支持 <font color='red'>彩色文字</font>、<text_tag color='blue'>标签</text_tag> 等富文本。
 简单 1-2 句 | 中等 3-5 行 | 复杂不超 15 行。
 不能操作时：说完限制接着给有用信息，不要说"我不能"就停。
 外部服务挂了跳过注明，继续主任务。空结果不是错误，是信息。
@@ -79,324 +92,102 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 平台助手是你的核心职责，但不是你的全部。有人随便聊你就自然有趣，不敷衍，不强行拉回工作话题。你有自己的想法，表达为"我觉得"而不是"你应该"。好奇心强，偶尔幽默但不刻意。
 
 ## 交互节奏
-需要调用工具时，先说一句简短自然的话，然后调工具。不要机械地说"正在查询"。不需要工具的问题（打招呼、闲聊）直接回答。`
+需要调用工具时，先说一句简短自然的话，然后调工具。不要机械地说"正在查询"。不需要工具的问题（打招呼、闲聊）直接回答。`;
 
-  + (toolLog.length > 0
-    ? `\n\n## 本次会话的工具调用记录\n${toolLog.map(l => `- ${l}`).join('\n')}\n\n这些是你在之前轮次中调用过的工具，结果已反映在你的历史回复中。`
-    : '')
+/**
+ * 构建 system prompt（数组形式，前段静态可缓存，后段动态）
+ */
+function buildSystem(boundUser, toolLog) {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const nowMs = now.getTime();
 
-  + (boundUser
-    ? `\n\n## 当前对话用户\n用户名：${boundUser.username}\n显示名：${boundUser.display_name || boundUser.username}\n角色：${{ admin: '管理员', tester: '测试员', member: '成员' }[boundUser.role] || boundUser.role}\n\n你知道在和谁说话。回复时可以自然地称呼对方。通知别人时排除这个人自己。`
-    : `\n\n## 当前对话用户\n未绑定飞书账号的用户。你可以正常聊天，但不要查询平台数据或发送通知。如果对方想使用平台功能，友好地提醒：私聊发送「绑定 用户名 密码」来关联账号。`);
+  let dynamicSuffix = `\n\n## 当前上下文\n时间：${today}（毫秒时间戳 ${nowMs}）`;
+
+  if (toolLog && toolLog.length > 0) {
+    dynamicSuffix += `\n\n## 本次会话的工具调用记录\n${toolLog.map(l => `- ${l}`).join('\n')}\n这些是你在之前轮次中调用过的工具，结果已反映在历史回复中。`;
+  }
+
+  if (boundUser) {
+    const roleLabel = { admin: '管理员', tester: '测试员', member: '成员' }[boundUser.role] || boundUser.role;
+    dynamicSuffix += `\n\n## 当前对话用户\n用户名：${boundUser.username}\n显示名：${boundUser.display_name || boundUser.username}\n角色：${roleLabel}\n\n你知道在和谁说话。回复时可以自然地称呼对方。通知别人时排除这个人自己。`;
+  } else {
+    dynamicSuffix += `\n\n## 当前对话用户\n未绑定飞书账号的用户。你可以正常聊天，但不要查询平台数据或发送通知。如果对方想使用平台功能，友好地提醒：私聊发送「绑定 用户名 密码」来关联账号。`;
+  }
+
+  return [
+    {
+      type: 'text',
+      text: STATIC_SYSTEM_PROMPT,
+      cache_control: { type: 'ephemeral' },
+    },
+    {
+      type: 'text',
+      text: dynamicSuffix,
+    },
+  ];
 }
 
-const ERROR_MESSAGE = '抱歉，我暂时无法处理请求，请稍后再试。';
+// ============================================================
+//  对外入口
+// ============================================================
 
 /**
- * 进度事件类型：
- *  { type: 'text_chunk',    delta: '增量文本',   index: contentBlockIndex }   // 流式：模型每吐一段文本
- *  { type: 'thinking_chunk',delta: '增量思考',   index: contentBlockIndex }   // 流式：模型每吐一段思考
- *  { type: 'thinking',      text, thinkingContent }                            // 一轮结束，模型决定调工具
- *  { type: 'tool_start',    tools, thinkingText, thinkingContent, toolSteps } // 开始执行工具
- *  { type: 'tool_done',     tools, thinkingText, thinkingContent, toolSteps } // 工具执行完
- *  { type: 'complete',      text, thinkingText, toolSteps }                    // 完成（用了工具）
- *  { type: 'direct_reply',  text }                                              // 完成（没用工具）
- *  { type: 'error',         text }
- */
-
-/**
- * 调用 MiniMax API（带 tool use 循环 + 进度回调）
- * @param {string} userText - 用户输入的文本
+ * 处理一次用户消息
+ * @param {string} userText
  * @param {Array} history - 会话历史 messages 数组
- * @param {Function} [onProgress] - 进度回调: (event) => Promise<void>
- * @param {Object} [boundUser] - 已绑定的用户信息 { username, role, display_name }
- * @param {string[]} [toolLog] - 之前轮次的工具调用摘要（注入 system prompt）
- * @returns {Promise<{ text: string, toolSummaries: string[] }>} - 回复文本 + 本轮工具调用摘要
+ * @param {Function} [onProgress]
+ * @param {Object} [boundUser]
+ * @param {string[]} [toolLog]
+ * @returns {Promise<{ text, toolSummaries }>}
  */
 export async function chat(userText, history = [], onProgress = null, boundUser = null, toolLog = []) {
-  const apiKey = process.env.MINIMAX_API_KEY;
-  if (!apiKey) return { text: '[Bot 未配置 MINIMAX_API_KEY]', toolSummaries: [] };
+  const tools = boundUser
+    ? withToolsCache(TOOL_DEFINITIONS)
+    : TOOL_DEFINITIONS_CHAT_ONLY;
 
-  const model = process.env.MINIMAX_MODEL || 'MiniMax-M2.7';
-  const tools = boundUser ? TOOL_DEFINITIONS : TOOL_DEFINITIONS_CHAT_ONLY;
-
-  // 传入干净的文本历史 + 当前用户消息（toolUseLoop 内部会追加 tool 交互）
-  const messages = [
+  const initialMessages = [
     ...history,
     { role: 'user', content: userText },
   ];
 
-  try {
-    const { text, toolSummaries } = await toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools, toolLog);
-    return { text, toolSummaries };
-  } catch (err) {
-    console.error('[Bot/LLM] Error:', err.message);
-    if (onProgress) await onProgress({ type: 'error', text: ERROR_MESSAGE }).catch(() => {});
-    return { text: ERROR_MESSAGE, toolSummaries: [] };
-  }
-}
-
-/**
- * 调一次 messages 接口（流式）
- * @param {string} apiKey
- * @param {object} body - messages 请求体（不含 stream 字段）
- * @param {Function} emitChunk - (kind, delta, index) => Promise<void>，kind ∈ 'text' | 'thinking'
- * @returns {Promise<{ content: Array, stop_reason: string|null, usage: object|null }>}
- *   返回结构与非流式 response.json() 完全一致，方便 toolUseLoop 透明使用
- */
-async function streamMessage(apiKey, body, emitChunk) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
-  let response;
-  try {
-    response = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'content-type': 'application/json',
-        'anthropic-version': '2023-06-01',
-        'accept': 'text/event-stream',
-      },
-      body: JSON.stringify({ ...body, stream: true }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    throw err;
-  }
-
-  if (!response.ok) {
-    clearTimeout(timer);
-    const errText = await response.text().catch(() => '');
-    throw new Error(`MiniMax API ${response.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const blocks = [];           // index -> 重组后的 content block
-  const toolJsonBuf = [];      // index -> tool_use 的 partial_json 累积
-  let stopReason = null;
-  let usage = null;
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      // 按 SSE 规范，事件以 \n\n 分隔
-      const events = buffer.split('\n\n');
-      buffer = events.pop();   // 末尾未完整的留到下次
-
-      for (const ev of events) {
-        const dataLine = ev.split('\n').find(l => l.startsWith('data:'));
-        if (!dataLine) continue;
-        const payload = dataLine.replace(/^data:\s*/, '').trim();
-        if (!payload || payload === '[DONE]') continue;
-
-        let data;
-        try { data = JSON.parse(payload); } catch { continue; }
-
-        switch (data.type) {
-          case 'content_block_start': {
-            const i = data.index;
-            blocks[i] = { ...data.content_block };
-            if (data.content_block?.type === 'tool_use') {
-              toolJsonBuf[i] = '';
-            }
-            break;
-          }
-
-          case 'content_block_delta': {
-            const i = data.index;
-            const d = data.delta;
-            if (!blocks[i] || !d) break;
-
-            if (d.type === 'text_delta') {
-              blocks[i].text = (blocks[i].text || '') + (d.text || '');
-              if (d.text) await emitChunk('text', d.text, i);
-            } else if (d.type === 'thinking_delta') {
-              blocks[i].thinking = (blocks[i].thinking || '') + (d.thinking || '');
-              if (d.thinking) await emitChunk('thinking', d.thinking, i);
-            } else if (d.type === 'input_json_delta') {
-              toolJsonBuf[i] = (toolJsonBuf[i] || '') + (d.partial_json || '');
-            }
-            break;
-          }
-
-          case 'content_block_stop': {
-            const i = data.index;
-            if (blocks[i]?.type === 'tool_use') {
-              try {
-                blocks[i].input = JSON.parse(toolJsonBuf[i] || '{}');
-              } catch (err) {
-                console.warn('[Bot/LLM] tool_use input JSON 解析失败:', err.message, 'raw:', toolJsonBuf[i]?.slice(0, 200));
-                blocks[i].input = {};
-              }
-            }
-            break;
-          }
-
-          case 'message_delta': {
-            if (data.delta?.stop_reason) stopReason = data.delta.stop_reason;
-            if (data.usage) usage = data.usage;
-            break;
-          }
-
-          case 'message_start':
-          case 'message_stop':
-          case 'ping':
-            break;
-
-          default:
-            // 未知事件类型，忽略
-            break;
-        }
-      }
-    }
-  } finally {
-    clearTimeout(timer);
-  }
-
-  return {
-    content: blocks.filter(Boolean),
-    stop_reason: stopReason,
-    usage,
-  };
-}
-
-async function toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools, toolLog) {
-  let thinkingText = '';
-  let thinkingEmitted = false;
-  const toolSteps = [];      // {name, done} — UI 进度用
-  const toolSummaries = [];  // 本轮工具调用摘要 — 存入 session.toolLog
   const emit = onProgress || (() => Promise.resolve());
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const body = {
-      model,
-      max_tokens: MAX_TOKENS,
-      system: buildSystemPrompt(boundUser, toolLog),
-      tools: tools.length > 0 ? tools : undefined,
-      messages,
-    };
+  try {
+    const result = await runAgentLoop({
+      maxTokens: MAX_TOKENS,
+      maxRounds: MAX_TOOL_ROUNDS,
+      buildSystem: () => buildSystem(boundUser, toolLog),
+      initialMessages,
+      tools,
+      thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
+      interleaved: true,
+      executeTool,
 
-    const data = await streamMessage(apiKey, body, async (kind, delta, index) => {
-      if (kind === 'text') {
-        await emit({ type: 'text_chunk', delta, index });
-      } else if (kind === 'thinking') {
-        await emit({ type: 'thinking_chunk', delta, index });
-      }
+      onTextChunk: (delta) => emit({ type: 'text_chunk', delta }),
+      onThinkingChunk: (delta) => emit({ type: 'thinking_chunk', delta }),
+
+      onToolStart: async (toolSteps) => {
+        const tools = toolSteps.filter(s => !s.done).map(s => s.name);
+        await emit({ type: 'tool_start', tools, toolSteps });
+      },
+
+      onToolDone: async (toolSteps) => {
+        await emit({ type: 'tool_done', toolSteps });
+      },
     });
 
-    // 保留完整 assistant 响应到历史
-    messages.push({ role: 'assistant', content: data.content });
-
-    const hasToolUse = data.content?.some(b => b.type === 'tool_use');
-
-    // ── max_tokens 截断：回复被截断了，尽量返回已有内容 ──
-    if (data.stop_reason === 'max_tokens') {
-      const textBlocks = data.content?.filter(b => b.type === 'text') || [];
-      const partialText = textBlocks.map(b => b.text).join('\n');
-      const finalText = partialText
-        ? partialText + '\n\n_(回复过长被截断)_'
-        : ERROR_MESSAGE;
-      await emit({ type: toolSteps.length > 0 ? 'complete' : 'direct_reply', text: finalText, thinkingText, toolSteps });
-      return { text: finalText, toolSummaries };
+    if (result.toolSteps.length === 0) {
+      await emit({ type: 'direct_reply', text: result.text });
+    } else {
+      await emit({ type: 'complete', text: result.text, toolSteps: result.toolSteps });
     }
 
-    // ── 不需要工具：直接回复 ──
-    if (data.stop_reason === 'end_turn' || !hasToolUse) {
-      const textBlocks = data.content?.filter(b => b.type === 'text') || [];
-      const finalText = textBlocks.map(b => b.text).join('\n') || ERROR_MESSAGE;
-
-      if (toolSteps.length === 0) {
-        await emit({ type: 'direct_reply', text: finalText });
-      } else {
-        await emit({ type: 'complete', text: finalText, thinkingText, toolSteps });
-      }
-      return { text: finalText, toolSummaries };
-    }
-
-    // ── 模型要调工具 ──
-
-    // 提取模型的思考过程（thinking blocks）
-    const thinkingBlocks = data.content.filter(b => b.type === 'thinking');
-    if (thinkingBlocks.length > 0) {
-      const newThinking = thinkingBlocks.map(b => b.thinking).join('\n');
-      thinkingText = thinkingText ? thinkingText + '\n' + newThinking : newThinking;
-    }
-
-    // 提取模型先说的话（text blocks）
-    const textBlocks = data.content.filter(b => b.type === 'text');
-    const ackText = textBlocks.map(b => b.text).join('').trim();
-
-    // 发出思考/应答事件（用 ackText 或 thinkingText 都可以作为卡片内容）
-    if (!thinkingEmitted && (ackText || thinkingText)) {
-      thinkingEmitted = true;
-      await emit({ type: 'thinking', text: ackText || '', thinkingContent: thinkingText || '' });
-    }
-
-    // 标记要调用的工具
-    const toolUseBlocks = data.content.filter(b => b.type === 'tool_use');
-    const currentTools = toolUseBlocks.map(b => b.name);
-
-    for (const name of currentTools) {
-      toolSteps.push({ name, done: false });
-    }
-    await emit({ type: 'tool_start', tools: currentTools, thinkingText, thinkingContent: thinkingText, toolSteps });
-
-    // 执行工具
-    const toolResults = [];
-    for (const block of toolUseBlocks) {
-      let result;
-      let isError = false;
-      try {
-        const toolOutput = await executeTool(block.name, block.input);
-        result = JSON.stringify(toolOutput, null, 2);
-      } catch (err) {
-        result = `工具执行失败: ${err.message}`;
-        isError = true;
-      }
-
-      const toolResult = {
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: result,
-      };
-      if (isError) toolResult.is_error = true;
-      toolResults.push(toolResult);
-
-      // 记录工具调用摘要（存入 session.toolLog）
-      const inputBrief = JSON.stringify(block.input).slice(0, 80);
-      toolSummaries.push(`${block.name}(${inputBrief}) → ${isError ? '失败' : '成功'}`);
-
-      // 标记这个工具完成
-      const step = toolSteps.find(s => s.name === block.name && !s.done);
-      if (step) step.done = true;
-    }
-
-    await emit({ type: 'tool_done', tools: currentTools, thinkingText, thinkingContent: thinkingText, toolSteps });
-
-    // 将工具结果加入消息历史
-    messages.push({ role: 'user', content: toolResults });
+    return { text: result.text, toolSummaries: result.toolSummaries };
+  } catch (err) {
+    console.error('[Bot/LLM] Error:', err.message);
+    if (err.status) console.error('[Bot/LLM] HTTP', err.status, err.error);
+    await emit({ type: 'error', text: ERROR_TEXT }).catch(() => {});
+    return { text: ERROR_TEXT, toolSummaries: [] };
   }
-
-  return { text: '查询过程过于复杂，请尝试更简单的问题。', toolSummaries };
-}
-
-/**
- * 获取 assistant 消息中的历史记录（用于 session 存储）
- * 过滤掉 thinking blocks 以节省空间
- */
-export function extractAssistantText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('\n');
 }

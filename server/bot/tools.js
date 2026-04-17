@@ -115,6 +115,17 @@ export const TOOL_DEFINITIONS = [
 // 闲聊工具集（未绑定用户）— 不含平台数据查询和通知
 export const TOOL_DEFINITIONS_CHAT_ONLY = [];
 
+/**
+ * 给 tool 数组的最后一项加 cache_control，使整个 tools 列表进入 prompt cache
+ * 工具定义稳定且体积大（~3000 token），缓存命中时输入价 ×0.1
+ */
+export function withToolsCache(tools) {
+  if (!tools || tools.length === 0) return tools;
+  const head = tools.slice(0, -1);
+  const last = { ...tools[tools.length - 1], cache_control: { type: 'ephemeral' } };
+  return [...head, last];
+}
+
 // ── 工具执行器 ──
 
 export async function executeTool(name, input = {}) {

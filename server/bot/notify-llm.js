@@ -1,22 +1,24 @@
 /**
  * 小合通知/巡检/中继代理
- * 轻量版 LLM tool-use 循环，独立于 chat() 的聊天逻辑
+ * 走 SDK 流式（思考更深，cache_control 复用 tools）
  *
  * 三个入口：
- *   analyzeChanges(changes)      — 变更通知决策
- *   runPatrol()                   — 定时巡检
- *   handleXiaoheTask(msg, caller) — MCP / 用户中继
+ *   analyzeChanges(changes)       — 变更通知决策（返回 JSON）
+ *   runPatrol()                    — 定时巡检（返回 JSON）
+ *   handleXiaoheTask(msg, caller)  — MCP / 用户中继（返回纯文本）
+ *
+ * 共用底座 runAgentLoop()，每个入口只负责构建 prompt 和解析结果
  */
 
-import { TOOL_DEFINITIONS, executeTool } from './tools.js';
+import { TOOL_DEFINITIONS, executeTool, withToolsCache } from './tools.js';
+import { runAgentLoop } from './agent-loop.js';
 
-const API_URL = 'https://api.minimaxi.com/anthropic/v1/messages';
 const MAX_TOOL_ROUNDS = 4;
-const REQUEST_TIMEOUT = 30000;
 const MAX_TOKENS = 4096;
+const THINKING_BUDGET = 1500;
 
 // ============================================================
-//  System Prompts（按模式切换）
+//  System Prompts（按模式切换，每段最后用 cache_control 缓存）
 // ============================================================
 
 function buildNotifyPrompt(changes) {
@@ -28,10 +30,7 @@ function buildNotifyPrompt(changes) {
     `- [${c.priority}] ${c.action} | ${c.entityType}:${c.entityId} | ${c.summary} | actor: ${c.actor || '未知'}`
   ).join('\n');
 
-  return {
-    system: `你是小合，DeskSkill TeamBoard 的协作中枢。现在你收到一批工作台变更，需要决定通知策略。
-
-当前时间：${today}（毫秒时间戳 ${nowMs}）。
+  const staticSystem = `你是小合，DeskSkill TeamBoard 的协作中枢。现在你收到一批工作台变更，需要决定通知策略。
 
 ## 通知原则
 1. **永远不通知操作者本人**（actor 做的事不需要再告诉 actor）
@@ -63,9 +62,17 @@ function buildNotifyPrompt(changes) {
 }
 
 如果这批变更不值得通知任何人：
-{ "group": { "send": false }, "individuals": [], "reasoning": "..." }`,
+{ "group": { "send": false }, "individuals": [], "reasoning": "..." }`;
 
-    user: `以下是待处理的变更批次：\n\n${changeList}\n\n请分析这些变更，决定通知策略。先用工具查询相关工单详情和团队成员，再做决策。`,
+  const dynamic = `\n\n当前时间：${today}（毫秒时间戳 ${nowMs}）。`;
+  const userMsg = `以下是待处理的变更批次：\n\n${changeList}\n\n请分析这些变更，决定通知策略。先用工具查询相关工单详情和团队成员，再做决策。`;
+
+  return {
+    system: [
+      { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: dynamic },
+    ],
+    user: userMsg,
   };
 }
 
@@ -74,10 +81,7 @@ function buildPatrolPrompt() {
   const today = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
 
-  return {
-    system: `你是小合，DeskSkill TeamBoard 的协作中枢。现在是每日巡检时间，你需要扫描平台状态，发现异常。
-
-当前时间：${today}（毫秒时间戳 ${nowMs}）。
+  const staticSystem = `你是小合，DeskSkill TeamBoard 的协作中枢。现在是每日巡检时间，你需要扫描平台状态，发现异常。
 
 ## 巡检要点
 用工具查询所有工单和团队成员，检查以下异常：
@@ -97,8 +101,13 @@ function buildPatrolPrompt() {
 }
 
 一切正常 → { "group": { "send": false }, "individuals": [], "reasoning": "无异常" }
-只有值得关注的异常才通知。不要把正常状态当异常。`,
+只有值得关注的异常才通知。不要把正常状态当异常。`;
 
+  return {
+    system: [
+      { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: `\n\n当前时间：${today}（毫秒时间戳 ${nowMs}）。` },
+    ],
     user: '请执行每日巡检。先用工具查询所有工单状态和团队成员，然后分析是否有需要关注的异常。',
   };
 }
@@ -108,10 +117,7 @@ function buildRelayPrompt(callerUsername) {
   const today = now.toISOString().slice(0, 10);
   const nowMs = now.getTime();
 
-  return `你是小合，DeskSkill TeamBoard 的协作中枢。
-
-当前时间：${today}（毫秒时间戳 ${nowMs}）。
-调用者：${callerUsername}
+  const staticSystem = `你是小合，DeskSkill TeamBoard 的协作中枢。
 
 你收到了一个任务请求。理解意图后执行：
 - 如果是通知某人 → 用工具查上下文，然后用 send_notification 发送个性化消息
@@ -123,89 +129,29 @@ function buildRelayPrompt(callerUsername) {
 比如调用者说"通知测试员开始评测"，你应该先查有哪些待评测的工单，再给测试员发具体内容。
 
 直接回复执行结果。`;
+
+  return [
+    { type: 'text', text: staticSystem, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: `\n\n当前时间：${today}（毫秒时间戳 ${nowMs}）。\n调用者：${callerUsername}` },
+  ];
 }
 
 // ============================================================
-//  轻量版 tool-use 循环
+//  跑一次 agent，返回纯文本
 // ============================================================
 
-async function runAgent(systemPrompt, userMessage) {
-  const apiKey = process.env.MINIMAX_API_KEY;
-  if (!apiKey) throw new Error('MINIMAX_API_KEY 未配置');
-
-  const model = process.env.MINIMAX_MODEL || 'MiniMax-M2.7';
-  const messages = [{ role: 'user', content: userMessage }];
-
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
-    let response;
-    try {
-      response = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'content-type': 'application/json',
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: MAX_TOKENS,
-          system: systemPrompt,
-          tools: TOOL_DEFINITIONS,
-          messages,
-        }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`MiniMax API ${response.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
-    messages.push({ role: 'assistant', content: data.content });
-
-    const hasToolUse = data.content?.some(b => b.type === 'tool_use');
-
-    // 不需要工具或到达终止
-    if (data.stop_reason === 'end_turn' || data.stop_reason === 'max_tokens' || !hasToolUse) {
-      const textBlocks = data.content?.filter(b => b.type === 'text') || [];
-      return textBlocks.map(b => b.text).join('\n');
-    }
-
-    // 执行工具
-    const toolUseBlocks = data.content.filter(b => b.type === 'tool_use');
-    const toolResults = [];
-
-    for (const block of toolUseBlocks) {
-      let result;
-      let isError = false;
-      try {
-        const output = await executeTool(block.name, block.input);
-        result = JSON.stringify(output, null, 2);
-      } catch (err) {
-        result = `工具执行失败: ${err.message}`;
-        isError = true;
-      }
-
-      const toolResult = {
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: result,
-      };
-      if (isError) toolResult.is_error = true;
-      toolResults.push(toolResult);
-    }
-
-    messages.push({ role: 'user', content: toolResults });
-  }
-
-  return '{"group":{"send":false},"individuals":[],"reasoning":"工具调用轮次过多"}';
+async function runAgent(system, userMessage) {
+  const result = await runAgentLoop({
+    maxTokens: MAX_TOKENS,
+    maxRounds: MAX_TOOL_ROUNDS,
+    buildSystem: () => system,
+    initialMessages: [{ role: 'user', content: userMessage }],
+    tools: withToolsCache(TOOL_DEFINITIONS),
+    thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
+    interleaved: true,
+    executeTool,
+  });
+  return result.text;
 }
 
 // ============================================================
@@ -213,7 +159,6 @@ async function runAgent(systemPrompt, userMessage) {
 // ============================================================
 
 function parseDecision(text) {
-  // 尝试从文本中提取 JSON
   let json = text.trim();
 
   // 去掉可能的 markdown 代码块包裹
@@ -222,7 +167,6 @@ function parseDecision(text) {
 
   try {
     const decision = JSON.parse(json);
-    // 基本结构校验
     if (!decision.group) decision.group = { send: false };
     if (!Array.isArray(decision.individuals)) decision.individuals = [];
     return decision;
@@ -233,12 +177,9 @@ function parseDecision(text) {
 }
 
 // ============================================================
-//  对外暴露的三个入口
+//  对外暴露
 // ============================================================
 
-/**
- * 分析一批变更，返回通知决策
- */
 export async function analyzeChanges(changes) {
   const { system, user } = buildNotifyPrompt(changes);
   const raw = await runAgent(system, user);
@@ -248,14 +189,9 @@ export async function analyzeChanges(changes) {
     console.log(`[NotifyLLM] 通知决策: group=${decision.group?.send}, individuals=${decision.individuals?.length}, reasoning=${decision.reasoning?.slice(0, 80)}`);
     return decision;
   }
-
-  // 解析失败退化为兜底
   return fallbackNotify(changes);
 }
 
-/**
- * 定时巡检
- */
 export async function runPatrol() {
   const { system, user } = buildPatrolPrompt();
   const raw = await runAgent(system, user);
@@ -265,13 +201,9 @@ export async function runPatrol() {
     console.log(`[NotifyLLM] 巡检结果: group=${decision.group?.send}, individuals=${decision.individuals?.length}`);
     return decision;
   }
-
   return { group: { send: false }, individuals: [], reasoning: '巡检 LLM 解析失败' };
 }
 
-/**
- * MCP / 用户中继任务
- */
 export async function handleXiaoheTask(message, callerUsername) {
   const system = buildRelayPrompt(callerUsername);
   const result = await runAgent(system, message);
