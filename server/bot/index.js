@@ -40,8 +40,8 @@ import {
   THINKING_PANEL_DONE_PATCH,
 } from './card-templates.js';
 
-const THROTTLE_MS = 500;
-const FLUSH_AT_CHARS = 50;
+const THROTTLE_MS = 300;
+const FLUSH_AT_CHARS = 30;
 
 /**
  * 启动飞书机器人
@@ -81,49 +81,83 @@ class ChatCardStreamer {
     this.runningThinking = '';    // 全局思考链
     this.currentToolSteps = [];
 
-    this.thinkingPanelInserted = false;
-    this.toolPanelInserted = false;
-    this.thinkingCollapsed = false;
+    // ── Promise 备忘锁，防止并发 chunk 重复触发 insert/patch ──
+    this._cardPromise = null;
+    this._thinkingPanelPromise = null;
+    this._toolPanelPromise = null;
+    this._thinkingCollapsePromise = null;
+
+    // ── per-card 顺序队列：所有 CardKit 调用串行化，保证 sequence 接收顺序 ──
+    this._opQueue = Promise.resolve();
 
     // per-element 节流：elementId -> { lastFlushTime, lastFlushedLen, timer }
     this.flushState = new Map();
   }
 
+  /** 把一段操作排进串行队列，保证 sequence 单调到达 */
+  _enqueue(label, fn) {
+    const next = this._opQueue.then(fn).catch(err => {
+      console.error(`[Bot/Stream] ${label} 失败:`, err?.message || err);
+    });
+    this._opQueue = next.catch(() => {});  // 单根链不被错误中断
+    return next;
+  }
+
   async ensureCardCreated() {
-    if (this.cardId) return true;
-    this.cardId = await createCardEntity(buildChatCardInitial());
-    if (!this.cardId) {
-      console.error('[Bot] 创建卡片实体失败');
-      return false;
+    if (!this._cardPromise) {
+      this._cardPromise = (async () => {
+        const cid = await createCardEntity(buildChatCardInitial());
+        if (!cid) throw new Error('createCardEntity 返回 null');
+        this.cardId = cid;
+        this.messageId = await sendCardById(this.receiveId, this.receiveIdType, cid);
+        console.log(`[Bot/Stream] 卡片已创建 cardId=${cid}`);
+      })();
     }
-    this.messageId = await sendCardById(this.receiveId, this.receiveIdType, this.cardId);
-    return true;
+    return this._cardPromise;
   }
 
   async ensureThinkingPanel() {
-    if (this.thinkingPanelInserted) return;
-    if (!(await this.ensureCardCreated())) return;
-    const ok = await insertCardElements(this.cardId, buildThinkingPanel(), {
-      type: 'insert_before',
-      targetElementId: 'main_text',
-    });
-    if (ok) this.thinkingPanelInserted = true;
+    if (!this._thinkingPanelPromise) {
+      this._thinkingPanelPromise = (async () => {
+        await this.ensureCardCreated();
+        await this._enqueue('insert thinking_panel', async () => {
+          await insertCardElements(this.cardId, buildThinkingPanel(), {
+            type: 'insert_before',
+            targetElementId: 'main_text',
+          });
+          console.log('[Bot/Stream] thinking_panel 已插入');
+        });
+      })();
+    }
+    return this._thinkingPanelPromise;
   }
 
   async ensureToolPanel() {
-    if (this.toolPanelInserted) return;
-    if (!(await this.ensureCardCreated())) return;
-    const ok = await insertCardElements(this.cardId, buildToolPanel(), {
-      type: 'insert_before',
-      targetElementId: 'main_text',
-    });
-    if (ok) this.toolPanelInserted = true;
+    if (!this._toolPanelPromise) {
+      this._toolPanelPromise = (async () => {
+        await this.ensureCardCreated();
+        await this._enqueue('insert tool_panel', async () => {
+          await insertCardElements(this.cardId, buildToolPanel(), {
+            type: 'insert_before',
+            targetElementId: 'main_text',
+          });
+          console.log('[Bot/Stream] tool_panel 已插入');
+        });
+      })();
+    }
+    return this._toolPanelPromise;
   }
 
   async collapseThinking() {
-    if (!this.thinkingPanelInserted || this.thinkingCollapsed || !this.cardId) return;
-    this.thinkingCollapsed = true;
-    await patchCardElement(this.cardId, 'thinking_panel', THINKING_PANEL_DONE_PATCH);
+    if (!this._thinkingPanelPromise || this._thinkingCollapsePromise) return;
+    this._thinkingCollapsePromise = (async () => {
+      await this._thinkingPanelPromise;  // 等面板真正存在
+      await this._enqueue('collapse thinking_panel', async () => {
+        await patchCardElement(this.cardId, 'thinking_panel', THINKING_PANEL_DONE_PATCH);
+        console.log('[Bot/Stream] thinking_panel 已收起');
+      });
+    })();
+    return this._thinkingCollapsePromise;
   }
 
   // ── 节流推送 ──
@@ -143,28 +177,31 @@ class ChatCardStreamer {
     const elapsed = Date.now() - st.lastFlushTime;
 
     if (elapsed >= THROTTLE_MS || newChars >= FLUSH_AT_CHARS) {
-      return this.flushElement(elementId, content);
+      this.flushElement(elementId, content);  // fire-and-forget；队列内串行
+      return;
     }
 
     if (!st.timer) {
       const wait = Math.max(0, THROTTLE_MS - elapsed);
       st.timer = setTimeout(() => {
         st.timer = null;
-        this.flushElement(elementId, getContent()).catch(err => {
-          console.error(`[Bot] trailing flush ${elementId} 失败:`, err.message);
-        });
+        this.flushElement(elementId, getContent());
       }, wait);
     }
   }
 
-  async flushElement(elementId, content) {
+  flushElement(elementId, content) {
     const st = this._state(elementId);
     if (st.timer) { clearTimeout(st.timer); st.timer = null; }
     st.lastFlushTime = Date.now();
     st.lastFlushedLen = content.length;
 
-    if (!this.cardId) return;
-    await streamCardText(this.cardId, elementId, content);
+    return this._enqueue(`stream ${elementId}`, async () => {
+      // 等卡片真正创建完毕（trailing flush 可能在 cardId 就绪前触发）
+      await this.ensureCardCreated();
+      if (!this.cardId) return;  // 创建彻底失败，丢弃更新
+      await streamCardText(this.cardId, elementId, content);
+    });
   }
 
   cancelAllPending() {
@@ -175,34 +212,34 @@ class ChatCardStreamer {
 
   // ── 事件处理 ──
 
-  async onThinkingChunk(delta) {
+  onThinkingChunk(delta) {
     this.runningThinking += delta;
-    await this.ensureThinkingPanel();
+    // ensureThinkingPanel 已 promise 备忘，并发安全
+    this.ensureThinkingPanel().catch(() => {});
     this.scheduleFlush('thinking_text', () => this.runningThinking);
   }
 
-  async onTextChunk(delta) {
+  onTextChunk(delta) {
     this.runningText += delta;
-    await this.ensureCardCreated();
-    // 首个答案 chunk 触发收起思考面板（fire & forget，不阻塞 chunk 流）
-    if (this.thinkingPanelInserted && !this.thinkingCollapsed) {
-      this.collapseThinking().catch(() => {});
+    this.ensureCardCreated().catch(() => {});
+    // 首个答案 chunk 触发收起思考面板（队列内自动 await 面板存在）
+    if (this._thinkingPanelPromise && !this._thinkingCollapsePromise) {
+      this.collapseThinking();
     }
     this.scheduleFlush('main_text', () => this.runningText);
   }
 
   async onToolStart(toolSteps) {
     this.currentToolSteps = toolSteps || [];
-    await this.ensureCardCreated();
-    await this.ensureToolPanel();
-    await this.collapseThinking();
-    await this.flushElement('tool_progress', buildToolProgressMarkdown(this.currentToolSteps));
+    this.ensureToolPanel().catch(() => {});
+    this.collapseThinking();
+    this.flushElement('tool_progress', buildToolProgressMarkdown(this.currentToolSteps));
   }
 
   async onToolDone(toolSteps) {
     this.currentToolSteps = toolSteps || [];
-    if (this.toolPanelInserted) {
-      await this.flushElement('tool_progress', buildToolProgressMarkdown(this.currentToolSteps));
+    if (this._toolPanelPromise) {
+      this.flushElement('tool_progress', buildToolProgressMarkdown(this.currentToolSteps));
     }
     this.runningText = '';   // 下一轮文本重新累积
   }
@@ -215,33 +252,37 @@ class ChatCardStreamer {
         buildSimpleCard(finalText, { level: 'info' }));
       return;
     }
-    await this.collapseThinking();
-    await this.flushElement('main_text', finalText);
-    if (this.toolPanelInserted) {
-      await patchCardElement(this.cardId, 'tool_panel',
-        buildToolPanelDonePatch(this.currentToolSteps.length));
+    this.collapseThinking();
+    this.flushElement('main_text', finalText);
+    if (this._toolPanelPromise) {
+      this._enqueue('collapse tool_panel', () =>
+        patchCardElement(this.cardId, 'tool_panel',
+          buildToolPanelDonePatch(this.currentToolSteps.length))
+      );
     }
-    await closeStreamingMode(this.cardId);
+    this._enqueue('closeStreamingMode', () => closeStreamingMode(this.cardId));
+    await this._opQueue;   // 等所有排队操作完成
   }
 
   async onDirectReply(finalText) {
     this.cancelAllPending();
     if (!this.cardId) {
-      // 没用工具且没产 chunks → 直接一次性发
       await createAndSendCard(this.receiveId, this.receiveIdType,
         buildSimpleCard(finalText, { level: 'info' }));
       return;
     }
-    await this.collapseThinking();
-    await this.flushElement('main_text', finalText);
-    await closeStreamingMode(this.cardId);
+    this.collapseThinking();
+    this.flushElement('main_text', finalText);
+    this._enqueue('closeStreamingMode', () => closeStreamingMode(this.cardId));
+    await this._opQueue;
   }
 
   async onError(text) {
     this.cancelAllPending();
     if (this.cardId) {
-      await this.flushElement('main_text', text);
-      await closeStreamingMode(this.cardId);
+      this.flushElement('main_text', text);
+      this._enqueue('closeStreamingMode', () => closeStreamingMode(this.cardId));
+      await this._opQueue;
     } else {
       await createAndSendCard(this.receiveId, this.receiveIdType,
         buildSimpleCard(text, { level: 'error' }));

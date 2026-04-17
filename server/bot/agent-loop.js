@@ -82,12 +82,19 @@ export async function runAgentLoop(opts) {
 
     const stream = client.messages.stream(body, requestOpts);
 
+    // 诊断计数器（每轮独立）
+    let textCount = 0, thinkingCount = 0;
+
     if (onTextChunk) {
-      stream.on('text', (delta) => onTextChunk(delta, round));
+      stream.on('text', (delta) => {
+        textCount++;
+        onTextChunk(delta, round);
+      });
     }
     if (onThinkingChunk) {
       stream.on('streamEvent', (evt) => {
         if (evt.type === 'content_block_delta' && evt.delta?.type === 'thinking_delta') {
+          thinkingCount++;
           onThinkingChunk(evt.delta.thinking, round);
         }
       });
@@ -100,6 +107,17 @@ export async function runAgentLoop(opts) {
       console.error('[AgentLoop] stream 失败:', err.message);
       throw err;
     }
+
+    const blockTypes = final.content.map(b => b.type).join(',');
+    const cacheRead = final.usage?.cache_read_input_tokens || 0;
+    const cacheWrite = final.usage?.cache_creation_input_tokens || 0;
+    console.log(
+      `[AgentLoop] round=${round} blocks=[${blockTypes}] ` +
+      `chunks(text=${textCount}, thinking=${thinkingCount}) ` +
+      `tokens(in=${final.usage?.input_tokens}, out=${final.usage?.output_tokens}, ` +
+      `cacheR=${cacheRead}, cacheW=${cacheWrite}) ` +
+      `stop=${final.stop_reason} interleaved=${interleaved}`
+    );
 
     // 完整 content 入历史（保留 thinking + tool_use 顺序，满足 interleaved 约束）
     messages.push({ role: 'assistant', content: final.content });
