@@ -41,6 +41,12 @@ import {
   buildErrorCard,
   buildSimpleCard,
 } from './card-templates.js';
+import {
+  buildIconProbeCard,
+  buildColorProbeCard,
+  buildHeaderTemplateProbeCard,
+  HEADER_TEMPLATES,
+} from './_probe-cards.js';
 
 const THROTTLE_MS = 300;
 const FLUSH_AT_CHARS = 30;
@@ -364,6 +370,33 @@ class ChatCardStreamer {
 async function handleMessage(text, chatId, userId, chatType) {
   const receiveId = chatType === 'p2p' ? userId : chatId;
   const receiveIdType = chatType === 'p2p' ? 'open_id' : 'chat_id';
+
+  // ── 探测指令（dev-only，仅 p2p）──
+  // /probe icons   - 测 icon token 可用性
+  // /probe colors  - 测 icon color 值
+  // /probe templates - 逐张发 header template 测试卡（13 张）
+  // /probe all     - icons + colors（不含 templates 避免刷屏）
+  const probeMatch = text.trim().match(/^\/probe(?:\s+(icons|colors|templates|all))?$/i);
+  if (probeMatch) {
+    if (chatType !== 'p2p') {
+      await createAndSendCard(receiveId, receiveIdType,
+        buildSimpleCard('/probe 命令仅限私聊，群里刷屏了不好看~', { level: 'warn' }));
+      return;
+    }
+    const target = (probeMatch[1] || 'all').toLowerCase();
+    if (target === 'icons' || target === 'all') {
+      await createAndSendCard(receiveId, receiveIdType, buildIconProbeCard());
+    }
+    if (target === 'colors' || target === 'all') {
+      await createAndSendCard(receiveId, receiveIdType, buildColorProbeCard());
+    }
+    if (target === 'templates') {
+      for (const tpl of HEADER_TEMPLATES) {
+        await createAndSendCard(receiveId, receiveIdType, buildHeaderTemplateProbeCard(tpl));
+      }
+    }
+    return;
+  }
 
   // ── 绑定指令（不经过 LLM）──
   const bindMatch = text.match(/^绑定\s+(\S+)\s+(\S+)$/);

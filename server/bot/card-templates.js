@@ -42,7 +42,7 @@ const SCENE_HEADERS = {
 
 /** 完成态 header（场景无关，永远绿勾 + "小合"） */
 const COMPLETE_HEADER = {
-  icon: 'done-circle_outlined', color: 'green', template: 'default',
+  icon: 'done_outlined', color: 'green', template: 'default',
 };
 
 /** 文案池：initial titles / initial subtitles / initial summaries / complete subtitles */
@@ -176,7 +176,7 @@ export function buildThinkingPill(round) {
         title: { tag: 'markdown', content: "<font color='grey'>● 思考中...</font>" },
         vertical_align: 'center',
         padding: '4px 8px 4px 8px',
-        icon: { tag: 'standard_icon', token: 'plus_outlined', size: '12px 12px', color: 'grey' },
+        icon: { tag: 'standard_icon', token: 'add_outlined', size: '12px 12px', color: 'grey' },
         icon_position: 'right',
         icon_expanded_angle: -45,
       },
