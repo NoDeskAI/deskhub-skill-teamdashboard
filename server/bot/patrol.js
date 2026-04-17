@@ -4,8 +4,8 @@
  */
 
 import { runPatrol } from './notify-llm.js';
-import { sendCard, getFeishuOpenIds } from './feishu.js';
-import { buildPatrolCard, buildPersonalNotificationCard } from './card-templates.js';
+import { createAndSendCard, getFeishuOpenIds } from './feishu.js';
+import { buildPatrolCard, buildPersonalCard } from './card-templates.js';
 
 const PATROL_HOUR = Number(process.env.BOT_PATROL_HOUR) || 9;
 
@@ -44,7 +44,9 @@ async function checkPatrolTime() {
 
     // 群聊通知
     if (decision.group?.send && decision.group.message) {
-      const card = buildPatrolCard(decision.group.message);
+      const card = buildPatrolCard(decision.group.message, {
+        attentionCount: decision.individuals?.length || 0,
+      });
       await sendToGroups(card);
     }
 
@@ -57,8 +59,8 @@ async function checkPatrolTime() {
       for (const { username, message } of decision.individuals) {
         const openId = openIdMap[username];
         if (!openId) continue;
-        const card = buildPersonalNotificationCard(message);
-        await sendCard(openId, 'open_id', card);
+        const card = buildPersonalCard(message);
+        await createAndSendCard(openId, 'open_id', card);
       }
     }
 
@@ -75,6 +77,6 @@ async function sendToGroups(card) {
     .filter(Boolean);
 
   for (const chatId of chatIds) {
-    await sendCard(chatId, 'chat_id', card);
+    await createAndSendCard(chatId, 'chat_id', card);
   }
 }

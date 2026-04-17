@@ -1,13 +1,36 @@
 /**
  * 飞书 SDK 封装
  * WSClient 长连接接收消息（无需公网 IP）
- * Client API 发送消息/卡片
+ * Client API 发送消息 + CardKit v1（卡片实体 + 组件级流式更新）
  */
 
 import * as lark from '@larksuiteoapi/node-sdk';
+import crypto from 'crypto';
 
 let client = null;
 let botOpenId = null;
+
+// ── CardKit sequence 管理 ──
+// 飞书要求每个 card_id 的更新 sequence 严格递增
+const cardSequences = new Map();
+
+function nextSeq(cardId) {
+  const cur = (cardSequences.get(cardId) || 0) + 1;
+  cardSequences.set(cardId, cur);
+  return cur;
+}
+
+function uuid() {
+  return crypto.randomUUID();
+}
+
+// 卡片实体最长 14 天有效，定时清理 sequence 表防止内存泄漏
+setInterval(() => {
+  // 简单粗暴：sequence 超过 1000 的 card 清理掉（流式聊天不会用到这么多）
+  for (const [cid, seq] of cardSequences.entries()) {
+    if (seq > 1000) cardSequences.delete(cid);
+  }
+}, 60 * 60 * 1000);  // 每小时
 
 // 消息去重（message_id / event_id 级别，防飞书事件重发）
 // per-user 串行化由 concurrency.js 的 mutex 负责
@@ -151,68 +174,247 @@ export async function sendText(receiveId, receiveIdType, text) {
   }
 }
 
+// ============================================================
+//  CardKit v1（卡片实体 + 组件级流式更新）
+//
+//  关键概念：
+//  - 卡片实体（card_id）独立于消息存在，14 天有效
+//  - streaming_mode 下文本更新走打字机效果，不计 QPS 上限
+//  - 所有更新需带 sequence（严格递增）和 uuid（幂等）
+// ============================================================
+
 /**
- * 发送交互卡片消息
- * @param {string} receiveId - chat_id 或 open_id
- * @param {string} receiveIdType - 'chat_id' | 'open_id'
- * @param {object} card - 飞书卡片 JSON
+ * 创建卡片实体
+ * @param {object} cardJson - 完整 card JSON 2.0 结构
+ * @returns {Promise<string|null>} card_id
  */
-export async function sendCard(receiveId, receiveIdType, card) {
-  if (!client) return;
+export async function createCardEntity(cardJson) {
+  if (!client) return null;
   try {
-    await client.im.v1.message.create({
-      params: { receive_id_type: receiveIdType },
+    const res = await client.cardkit.v1.card.create({
       data: {
-        receive_id: receiveId,
-        msg_type: 'interactive',
-        content: JSON.stringify(card),
+        type: 'card_json',
+        data: JSON.stringify(cardJson),
       },
     });
+    const cardId = res?.data?.card_id || null;
+    if (!cardId) {
+      console.error('[Bot/Feishu] 创建卡片实体失败：返回 card_id 为空', res);
+    }
+    return cardId;
   } catch (err) {
-    console.error('[Bot/Feishu] 发送卡片失败:', err.message);
+    console.error('[Bot/Feishu] 创建卡片实体失败:', err.message);
+    return null;
   }
 }
 
 /**
- * 发送卡片并返回 message_id（用于后续更新）
+ * 发送消息引用已创建的卡片实体
+ * @param {string} receiveId - chat_id 或 open_id
+ * @param {string} receiveIdType - 'chat_id' | 'open_id'
+ * @param {string} cardId
  * @returns {Promise<string|null>} message_id
  */
-export async function sendCardGetId(receiveId, receiveIdType, card) {
-  if (!client) return null;
+export async function sendCardById(receiveId, receiveIdType, cardId) {
+  if (!client || !cardId) return null;
   try {
     const res = await client.im.v1.message.create({
       params: { receive_id_type: receiveIdType },
       data: {
         receive_id: receiveId,
         msg_type: 'interactive',
-        content: JSON.stringify(card),
+        content: JSON.stringify({ type: 'card', data: { card_id: cardId } }),
       },
     });
     return res?.data?.message_id || null;
   } catch (err) {
-    console.error('[Bot/Feishu] 发送卡片失败:', err.message);
+    console.error('[Bot/Feishu] 发送卡片实体失败:', err.message);
     return null;
   }
 }
 
 /**
- * 更新已发送的卡片内容（原地更新，同一张卡片）
- * @param {string} messageId - 要更新的消息 ID
- * @param {object} card - 新的卡片 JSON
+ * 一站式：创建卡片实体并发送消息
+ * @returns {Promise<{ cardId: string|null, messageId: string|null }>}
  */
-export async function updateCard(messageId, card) {
-  if (!client || !messageId) return;
+export async function createAndSendCard(receiveId, receiveIdType, cardJson) {
+  const cardId = await createCardEntity(cardJson);
+  if (!cardId) return { cardId: null, messageId: null };
+  const messageId = await sendCardById(receiveId, receiveIdType, cardId);
+  return { cardId, messageId };
+}
+
+/**
+ * 流式更新文本组件内容（打字机效果）
+ * 适用 plain_text 和 markdown 组件。需 streaming_mode 开启才能拿到打字机效果。
+ * 平台自动算 diff：新文本若是旧文本前缀超集，逐字渲染；否则瞬时替换。
+ * @param {string} cardId
+ * @param {string} elementId
+ * @param {string} content - 全量文本
+ */
+export async function streamCardText(cardId, elementId, content) {
+  if (!client || !cardId || !elementId) return false;
   try {
-    await client.im.v1.message.patch({
-      path: { message_id: messageId },
+    await client.cardkit.v1.cardElement.content({
+      path: { card_id: cardId, element_id: elementId },
       data: {
-        content: JSON.stringify(card),
+        uuid: uuid(),
+        content,
+        sequence: nextSeq(cardId),
       },
     });
+    return true;
   } catch (err) {
-    console.error('[Bot/Feishu] 更新卡片失败:', err.message);
+    console.error(`[Bot/Feishu] 流式推文本失败 (${elementId}):`, err.message);
+    return false;
   }
 }
+
+/**
+ * 在指定组件前/后插入新组件
+ * @param {string} cardId
+ * @param {object[]} elements - 组件 JSON 数组
+ * @param {object} opts
+ * @param {'insert_before'|'insert_after'|'append'} opts.type
+ * @param {string} [opts.targetElementId] - type 不为 append 时必填
+ */
+export async function insertCardElements(cardId, elements, { type = 'append', targetElementId } = {}) {
+  if (!client || !cardId) return false;
+  try {
+    await client.cardkit.v1.cardElement.create({
+      path: { card_id: cardId },
+      data: {
+        uuid: uuid(),
+        type,
+        target_element_id: targetElementId,
+        sequence: nextSeq(cardId),
+        elements: JSON.stringify(elements),
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error(`[Bot/Feishu] 插入组件失败 (${type}@${targetElementId || 'append'}):`, err.message);
+    return false;
+  }
+}
+
+/**
+ * 局部更新组件配置（partial merge）
+ * 例如收起折叠面板：patchCardElement(cardId, 'thinking_panel', { expanded: false })
+ */
+export async function patchCardElement(cardId, elementId, partial) {
+  if (!client || !cardId || !elementId) return false;
+  try {
+    await client.cardkit.v1.cardElement.patch({
+      path: { card_id: cardId, element_id: elementId },
+      data: {
+        uuid: uuid(),
+        sequence: nextSeq(cardId),
+        partial_element: JSON.stringify(partial),
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error(`[Bot/Feishu] patch 组件失败 (${elementId}):`, err.message);
+    return false;
+  }
+}
+
+/**
+ * 全量更新组件
+ */
+export async function updateCardElement(cardId, elementId, element) {
+  if (!client || !cardId || !elementId) return false;
+  try {
+    await client.cardkit.v1.cardElement.update({
+      path: { card_id: cardId, element_id: elementId },
+      data: {
+        uuid: uuid(),
+        sequence: nextSeq(cardId),
+        element: JSON.stringify(element),
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error(`[Bot/Feishu] 全量更新组件失败 (${elementId}):`, err.message);
+    return false;
+  }
+}
+
+/**
+ * 删除组件
+ */
+export async function deleteCardElement(cardId, elementId) {
+  if (!client || !cardId || !elementId) return false;
+  try {
+    await client.cardkit.v1.cardElement.delete({
+      path: { card_id: cardId, element_id: elementId },
+      data: {
+        uuid: uuid(),
+        sequence: nextSeq(cardId),
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error(`[Bot/Feishu] 删除组件失败 (${elementId}):`, err.message);
+    return false;
+  }
+}
+
+/**
+ * 全量更新卡片
+ */
+export async function updateCardEntity(cardId, cardJson) {
+  if (!client || !cardId) return false;
+  try {
+    await client.cardkit.v1.card.update({
+      path: { card_id: cardId },
+      data: {
+        uuid: uuid(),
+        sequence: nextSeq(cardId),
+        card: { type: 'card_json', data: JSON.stringify(cardJson) },
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error('[Bot/Feishu] 全量更新卡片失败:', err.message);
+    return false;
+  }
+}
+
+/**
+ * 更新卡片配置（如开/关 streaming_mode）
+ * @param {string} cardId
+ * @param {object} settings - 形如 { config: { streaming_mode: false } }
+ */
+export async function updateCardSettings(cardId, settings) {
+  if (!client || !cardId) return false;
+  try {
+    await client.cardkit.v1.card.settings({
+      path: { card_id: cardId },
+      data: {
+        uuid: uuid(),
+        sequence: nextSeq(cardId),
+        settings: JSON.stringify(settings),
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error('[Bot/Feishu] 更新卡片配置失败:', err.message);
+    return false;
+  }
+}
+
+/**
+ * 关闭流式模式（卡片可转发、可交互、摘要从"生成中..."切回）
+ */
+export async function closeStreamingMode(cardId) {
+  return updateCardSettings(cardId, { config: { streaming_mode: false } });
+}
+
+// ============================================================
+//  数据库辅助
+// ============================================================
 
 /**
  * 根据 username 列表查询 feishu_open_id，用于私聊通知

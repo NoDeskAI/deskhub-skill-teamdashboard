@@ -1,64 +1,32 @@
 /**
- * 飞书消息卡片模板
- * 支持实时更新的进度卡片 + 通知卡片
+ * 飞书卡片模板（Card JSON 2.0）
  *
- * 飞书卡片 Markdown 限制：
- * - 不支持表格语法（| col | col |）
- * - 彩色文字用 <text_tag color='neutral'>淡色文字</text_tag>
- * - 图片只能用 image_key，不能用 URL
- * - 所有可更新卡片必须包含 config.update_multi = true
+ * 五大场景：
+ *   1. 聊天（流式 + 折叠思考链 + 折叠工具进度 + 主答案）
+ *   2. 群聊变更通知
+ *   3. 私聊提醒
+ *   4. 每日巡检
+ *   5. 简单回复（绑定/背压/错误，按 level 区分图标和颜色）
+ *
+ * 配色：飞书 enum（orange/green/red/grey/indigo），自动适配深浅模式
+ * 图标：全 _outlined 线性
+ * Header：默认 template=default，仅高优/错误场景上色
  */
 
-const HEADER_TITLE = 'DeskHub 助手';
+const BOT_NAME = '小合';
 
-const HEADER_COLORS = {
-  info: 'blue',
-  thinking: 'blue',
-  success: 'green',
-  high: 'red',
-  summary: 'indigo',
+// ============================================================
+//  配置常量
+// ============================================================
+
+/** 流式更新节奏（ms） */
+const STREAMING_CONFIG = {
+  print_frequency_ms: { default: 30, pc: 30, ios: 30, android: 30 },
+  print_step: { default: 2 },
+  print_strategy: 'fast',
 };
 
-// 线性图标（JSON 2.0 standard_icon）
-const HEADER_ICON = {
-  tag: 'standard_icon',
-  token: 'myai-magic-wand_outlined',
-  color: 'blue',
-};
-
-const HEADER_ICON_THINKING = {
-  tag: 'standard_icon',
-  token: 'myai-magic-wand_outlined',
-  color: 'blue',
-};
-
-const HEADER_ICON_ERROR = {
-  tag: 'standard_icon',
-  token: 'info_outlined',
-  color: 'grey',
-};
-
-const HEADER_ICON_NOTIFY = {
-  tag: 'standard_icon',
-  token: 'bell_outlined',
-  color: 'blue',
-};
-
-// ── 变更通知用 ──
-const ACTION_EMOJI = {
-  created: '🆕',
-  updated: '📝',
-  status_changed: '🔄',
-  deleted: '🗑️',
-};
-
-const ENTITY_LABEL = {
-  plan: '工单',
-  variant: '方案',
-  score: '评分',
-};
-
-// ── 工具名称映射 ──
+/** 工具名称展示映射 */
 const TOOL_LABELS = {
   list_plans: '查询工单列表',
   get_plan_detail: '查询工单详情',
@@ -69,213 +37,213 @@ const TOOL_LABELS = {
   get_umami_active: '查询在线人数',
   list_users: '查询团队成员',
   get_recent_changes: '查询最近变更',
+  send_notification: '发送私聊提醒',
+};
+
+/** 变更通知用 emoji */
+const ACTION_EMOJI = {
+  created: '🆕',
+  updated: '📝',
+  status_changed: '🔄',
+  deleted: '🗑️',
 };
 
 // ============================================================
-//  辅助函数
+//  通用工具
 // ============================================================
 
-/** 把 thinking 内容包装成飞书淡色文字 */
-function greyText(text) {
-  return `<text_tag color='neutral'>${text}</text_tag>`;
+function timeStr(date = new Date()) {
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
-/** 截断过长文本 */
-function truncate(text, max = 200) {
-  if (!text) return '';
-  return text.length > max ? text.slice(0, max) + '...' : text;
+function dateStr(date = new Date()) {
+  return date.toISOString().slice(0, 10);
 }
 
-/** 构建 thinking 区域的 elements（分隔线 + 淡色思考内容） */
-function buildThinkingSection(thinkingContent, ackText) {
-  const parts = [];
+// ============================================================
+//  ① 聊天卡片（流式核心）
+// ============================================================
 
-  if (ackText) {
-    parts.push(ackText);
-  }
-  if (thinkingContent) {
-    parts.push(truncate(thinkingContent));
-  }
+/**
+ * 聊天卡片初始 JSON
+ * 仅含一个空的 main_text 元素，thinking_panel / tool_panel 在运行时动态插入
+ */
+export function buildChatCardInitial() {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: true,
+      streaming_config: STREAMING_CONFIG,
+      summary: { content: `${BOT_NAME}正在思考...` },
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: {
+      title: { tag: 'plain_text', content: BOT_NAME },
+      subtitle: { tag: 'plain_text', content: 'DeskHub 助手' },
+      icon: { tag: 'standard_icon', token: 'myai-magic-wand_outlined', color: 'orange' },
+      template: 'default',
+    },
+    body: {
+      elements: [
+        { tag: 'markdown', element_id: 'main_text', content: '' },
+      ],
+    },
+  };
+}
 
-  if (parts.length === 0) return [];
-
+/**
+ * 思考面板（折叠面板 + 内嵌 markdown）
+ * 第一次 thinking_chunk 到达时插入到 main_text 之前
+ */
+export function buildThinkingPanel() {
   return [
-    { tag: 'hr' },
     {
-      tag: 'markdown',
-      content: `${greyText('thinking')}\n${greyText(parts.join('\n'))}`,
+      tag: 'collapsible_panel',
+      element_id: 'thinking_panel',
+      expanded: true,
+      background_color: 'grey-50',
+      padding: '8px 12px',
+      margin: '0 0 8px 0',
+      header: {
+        title: { tag: 'plain_text', content: '💭 思考中…' },
+        vertical_align: 'center',
+        padding: '4px 8px',
+        icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+        icon_position: 'right',
+        icon_expanded_angle: -180,
+      },
+      elements: [
+        {
+          tag: 'markdown',
+          element_id: 'thinking_text',
+          content: '',
+          text_size: 'notation',
+        },
+      ],
     },
   ];
 }
 
-// ============================================================
-//  对话回复卡片（支持实时更新）
-// ============================================================
+/** 思考完成时收起折叠面板 + 改标题 */
+export const THINKING_PANEL_DONE_PATCH = {
+  expanded: false,
+  header: {
+    title: { tag: 'plain_text', content: '💭 思考过程' },
+    vertical_align: 'center',
+    padding: '4px 8px',
+    icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+    icon_position: 'right',
+    icon_expanded_angle: -180,
+  },
+};
 
 /**
- * 思考中卡片（初始状态 — 模型开始思考、准备调工具）
+ * 工具面板（折叠面板 + 内嵌进度 markdown）
+ * 第一次 tool_start 时插入到 main_text 之前
  */
-export function buildThinkingCard(ackText, thinkingContent) {
-  const elements = [];
-
-  // 主区域：模型先说的话
-  if (ackText) {
-    elements.push({ tag: 'markdown', content: `💭 ${ackText}` });
-  } else {
-    elements.push({ tag: 'markdown', content: '💭 思考中...' });
-  }
-
-  // thinking 区域
-  if (thinkingContent) {
-    elements.push(...buildThinkingSection(thinkingContent));
-  }
-
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true, update_multi: true },
-    header: {
-      title: { tag: 'plain_text', content: HEADER_TITLE },
-      icon: HEADER_ICON_THINKING,
-      template: HEADER_COLORS.thinking,
-    },
-    body: { elements },
-  };
-}
-
-/**
- * 工具调用进度卡片（中间状态）
- */
-export function buildProgressCard(ackText, toolSteps, thinkingContent) {
-  const elements = [];
-
-  // 主区域：模型说的话 + 工具进度
-  if (ackText) {
-    elements.push({ tag: 'markdown', content: `💭 ${ackText}` });
-  }
-
-  const stepLines = toolSteps.map(s => {
-    const label = TOOL_LABELS[s.name] || s.name;
-    return s.done ? `✅  ${label}` : `⏳  ${label}...`;
-  });
-  if (stepLines.length > 0) {
-    elements.push({ tag: 'markdown', content: stepLines.join('\n') });
-  }
-
-  // thinking 区域
-  if (thinkingContent) {
-    elements.push(...buildThinkingSection(thinkingContent));
-  }
-
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true, update_multi: true },
-    header: {
-      title: { tag: 'plain_text', content: HEADER_TITLE },
-      icon: HEADER_ICON_THINKING,
-      template: HEADER_COLORS.thinking,
-    },
-    body: { elements },
-  };
-}
-
-/**
- * 最终回复卡片（完成状态）
- * 只展示结果 + 思考过程，不展示工具链路
- */
-export function buildFinalCard(replyText) {
-  const elements = [
+export function buildToolPanel() {
+  return [
     {
-      tag: 'markdown',
-      content: replyText || '暂无数据',
+      tag: 'collapsible_panel',
+      element_id: 'tool_panel',
+      expanded: true,
+      background_color: 'grey-50',
+      padding: '8px 12px',
+      margin: '0 0 8px 0',
+      header: {
+        title: { tag: 'plain_text', content: '🔧 工具执行中…' },
+        vertical_align: 'center',
+        padding: '4px 8px',
+        icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+        icon_position: 'right',
+        icon_expanded_angle: -180,
+      },
+      elements: [
+        {
+          tag: 'markdown',
+          element_id: 'tool_progress',
+          content: '',
+        },
+      ],
     },
   ];
-
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true, update_multi: true },
-    header: {
-      title: { tag: 'plain_text', content: HEADER_TITLE },
-      icon: HEADER_ICON,
-      template: HEADER_COLORS.info,
-    },
-    body: { elements },
-  };
 }
 
 /**
- * 直接回复卡片（不需要工具调用时）
+ * 工具完成时收起折叠面板 + 改标题（"已使用 N 个工具"）
  */
-export function buildReplyCard(replyText) {
+export function buildToolPanelDonePatch(toolCount) {
   return {
-    schema: '2.0',
-    config: { wide_screen_mode: true, update_multi: true },
+    expanded: false,
     header: {
-      title: { tag: 'plain_text', content: HEADER_TITLE },
-      icon: HEADER_ICON,
-      template: HEADER_COLORS.info,
-    },
-    body: {
-      elements: [
-        { tag: 'markdown', content: replyText || '暂无数据' },
-      ],
+      title: { tag: 'plain_text', content: `🔧 已使用 ${toolCount} 个工具` },
+      vertical_align: 'center',
+      padding: '4px 8px',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', size: '14px 14px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
     },
   };
 }
 
 /**
- * 错误卡片
+ * 把工具步骤数组渲染成 markdown 文本
+ * @param {Array<{name:string, done:boolean}>} steps
  */
-export function buildErrorCard(errorText) {
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true, update_multi: true },
-    header: {
-      title: { tag: 'plain_text', content: HEADER_TITLE },
-      icon: HEADER_ICON_ERROR,
-      template: 'grey',
-    },
-    body: {
-      elements: [
-        { tag: 'markdown', content: errorText || '抱歉，我暂时无法处理请求，请稍后再试。' },
-      ],
-    },
-  };
+export function buildToolProgressMarkdown(steps) {
+  if (!steps || steps.length === 0) return '';
+  return steps
+    .map(s => {
+      const label = TOOL_LABELS[s.name] || s.name;
+      return s.done ? `✅  ${label}` : `⏳  ${label}…`;
+    })
+    .join('\n');
 }
 
 // ============================================================
-//  变更通知卡片
+//  ② 群聊变更通知
 // ============================================================
 
-export function buildNotificationCard(changes) {
+/**
+ * @param {string} message - LLM 整理的中文叙述（允许含表格）
+ * @param {object} opts
+ * @param {number} opts.changeCount
+ * @param {Array<{action,priority,summary}>} [opts.changes] - 用于生成顶部标签
+ */
+export function buildNotificationCard(message, { changeCount = 0, changes = [] } = {}) {
   const highCount = changes.filter(c => c.priority === 'high').length;
-  const template = highCount > 0 ? HEADER_COLORS.high : HEADER_COLORS.info;
+  const medCount = changes.filter(c => c.priority === 'medium').length;
 
-  const lines = changes.map(c => {
-    const emoji = ACTION_EMOJI[c.action] || '📌';
-    return `${emoji}  ${c.summary}`;
-  });
+  const tagList = [];
+  if (highCount > 0) tagList.push({ tag: 'text_tag', text: { tag: 'plain_text', content: `${highCount} 项高优` }, color: 'red' });
+  if (medCount > 0) tagList.push({ tag: 'text_tag', text: { tag: 'plain_text', content: `${medCount} 项中优` }, color: 'orange' });
+  tagList.push({ tag: 'text_tag', text: { tag: 'plain_text', content: 'AI 整理' }, color: 'neutral' });
 
-  const now = new Date();
-  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const isHighPriority = highCount > 0;
 
   return {
     schema: '2.0',
-    config: { wide_screen_mode: true },
+    config: { update_multi: true, width_mode: 'fill' },
     header: {
-      title: { tag: 'plain_text', content: `DeskHub 工作台更新 (${changes.length} 项)` },
-      icon: HEADER_ICON_NOTIFY,
-      template,
+      title: { tag: 'plain_text', content: `工作台 · ${changeCount} 项变更` },
+      subtitle: { tag: 'plain_text', content: timeStr() },
+      text_tag_list: tagList.slice(0, 3),
+      icon: {
+        tag: 'standard_icon',
+        token: 'bell_outlined',
+        color: isHighPriority ? 'red' : 'grey',
+      },
+      template: isHighPriority ? 'red' : 'default',
     },
     body: {
       elements: [
-        { tag: 'markdown', content: lines.join('\n') },
+        { tag: 'markdown', element_id: 'notify_body', content: message || '（无内容）' },
         { tag: 'hr' },
         {
-          tag: 'note',
-          elements: [{
-            tag: 'plain_text',
-            content: `共 ${changes.length} 项更新 | ${timeStr}${highCount ? ` | ${highCount} 项高优先级` : ''}`,
-          }],
+          tag: 'markdown',
+          content: `<font color='grey'>小合整理 · ${timeStr()}</font>`,
+          text_size: 'notation',
         },
       ],
     },
@@ -283,125 +251,117 @@ export function buildNotificationCard(changes) {
 }
 
 // ============================================================
-//  LLM 生成的个性化通知卡片
+//  ③ 私聊提醒（send_notification 工具发的）
 // ============================================================
 
 /**
- * LLM 生成的群聊通知卡片
+ * @param {string} message
+ * @param {object} [opts]
+ * @param {string} [opts.from] - "来自 小合" / "来自 admin"
  */
-export function buildLLMNotificationCard(message, changeCount) {
-  const now = new Date();
-  const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
+export function buildPersonalCard(message, { from = '小合' } = {}) {
   return {
     schema: '2.0',
-    config: { wide_screen_mode: true },
+    config: { update_multi: true, width_mode: 'fill' },
     header: {
-      title: { tag: 'plain_text', content: `DeskHub 工作台更新 (${changeCount} 项)` },
-      icon: HEADER_ICON_NOTIFY,
-      template: HEADER_COLORS.info,
+      title: { tag: 'plain_text', content: 'DeskHub 提醒' },
+      subtitle: { tag: 'plain_text', content: `来自 ${from}` },
+      icon: { tag: 'standard_icon', token: 'bell-ring_outlined', color: 'orange' },
+      template: 'default',
     },
     body: {
       elements: [
-        { tag: 'markdown', content: message },
-        { tag: 'hr' },
-        {
-          tag: 'note',
-          elements: [{ tag: 'plain_text', content: `${timeStr} | 小合整理` }],
-        },
-      ],
-    },
-  };
-}
-
-/**
- * 个人私聊通知卡片（send_notification 工具用）
- */
-export function buildPersonalNotificationCard(message) {
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: 'DeskHub 工作台提醒' },
-      icon: HEADER_ICON_NOTIFY,
-      template: HEADER_COLORS.info,
-    },
-    body: {
-      elements: [
-        { tag: 'markdown', content: message },
-      ],
-    },
-  };
-}
-
-/**
- * 巡检结果卡片
- */
-export function buildPatrolCard(message) {
-  const today = new Date().toISOString().slice(0, 10);
-
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: `DeskHub 每日巡检 — ${today}` },
-      icon: HEADER_ICON_NOTIFY,
-      template: HEADER_COLORS.summary,
-    },
-    body: {
-      elements: [
-        { tag: 'markdown', content: message },
-        { tag: 'hr' },
-        {
-          tag: 'note',
-          elements: [{ tag: 'plain_text', content: '小合每日巡检' }],
-        },
+        { tag: 'markdown', element_id: 'personal_body', content: message || '（无内容）' },
       ],
     },
   };
 }
 
 // ============================================================
-//  旧版模板通知（LLM 失败时兜底）
+//  ④ 每日巡检
 // ============================================================
 
-export function buildDailySummaryCard(changes) {
-  const byType = { plan: [], variant: [], score: [] };
-  for (const c of changes) {
-    (byType[c.entity_type] || []).push(c);
+/**
+ * @param {string} message - LLM 整理的巡检结果（允许含表格、人员标签等）
+ * @param {object} [opts]
+ * @param {number} [opts.attentionCount] - "N 项关注" 标签
+ */
+export function buildPatrolCard(message, { attentionCount = 0 } = {}) {
+  const tagList = [];
+  if (attentionCount > 0) {
+    tagList.push({
+      tag: 'text_tag',
+      text: { tag: 'plain_text', content: `${attentionCount} 项关注` },
+      color: 'indigo',
+    });
   }
 
-  const sections = [];
-  for (const [type, items] of Object.entries(byType)) {
-    if (items.length === 0) continue;
-    const label = ENTITY_LABEL[type] || type;
-    sections.push(`**${label}** (${items.length} 项)`);
-    for (const item of items.slice(0, 10)) {
-      const emoji = ACTION_EMOJI[item.action] || '📌';
-      sections.push(`  ${emoji}  ${item.summary}`);
-    }
-    if (items.length > 10) sections.push(`  ...及其他 ${items.length - 10} 项`);
-  }
-
-  const today = new Date().toISOString().slice(0, 10);
-
   return {
     schema: '2.0',
-    config: { wide_screen_mode: true },
+    config: { update_multi: true, width_mode: 'fill' },
     header: {
-      title: { tag: 'plain_text', content: `DeskHub 每日汇总 — ${today}` },
-      icon: HEADER_ICON_NOTIFY,
-      template: HEADER_COLORS.summary,
+      title: { tag: 'plain_text', content: '每日巡检' },
+      subtitle: { tag: 'plain_text', content: dateStr() },
+      text_tag_list: tagList,
+      icon: { tag: 'standard_icon', token: 'chart-ring_outlined', color: 'indigo' },
+      template: 'default',
     },
     body: {
       elements: [
-        { tag: 'markdown', content: sections.join('\n') || '今日暂无更新' },
+        { tag: 'markdown', element_id: 'patrol_body', content: message || '（无内容）' },
         { tag: 'hr' },
         {
-          tag: 'note',
-          elements: [{ tag: 'plain_text', content: `共 ${changes.length} 项变更` }],
+          tag: 'markdown',
+          content: `<font color='grey'>小合每日巡检 · ${timeStr()}</font>`,
+          text_size: 'notation',
         },
       ],
     },
   };
 }
+
+// ============================================================
+//  ⑤ 简单回复（绑定/背压/错误，按 level 区分）
+// ============================================================
+
+const SIMPLE_LEVEL_CONFIG = {
+  info:    { token: 'info_outlined',           color: 'grey',   template: 'default' },
+  success: { token: 'done_outlined',           color: 'green',  template: 'default' },
+  warn:    { token: 'warning-triangle_outlined', color: 'orange', template: 'default' },
+  error:   { token: 'close-circle_outlined',   color: 'red',    template: 'red' },
+};
+
+/**
+ * @param {string} content
+ * @param {object} [opts]
+ * @param {'info'|'success'|'warn'|'error'} [opts.level='info']
+ * @param {string} [opts.title='小合']
+ * @param {string} [opts.subtitle]
+ */
+export function buildSimpleCard(content, { level = 'info', title = BOT_NAME, subtitle } = {}) {
+  const cfg = SIMPLE_LEVEL_CONFIG[level] || SIMPLE_LEVEL_CONFIG.info;
+
+  const header = {
+    title: { tag: 'plain_text', content: title },
+    icon: { tag: 'standard_icon', token: cfg.token, color: cfg.color },
+    template: cfg.template,
+  };
+  if (subtitle) header.subtitle = { tag: 'plain_text', content: subtitle };
+
+  return {
+    schema: '2.0',
+    config: { update_multi: true, width_mode: 'fill' },
+    header,
+    body: {
+      elements: [
+        { tag: 'markdown', element_id: 'reply_body', content: content || '（无内容）' },
+      ],
+    },
+  };
+}
+
+// ============================================================
+//  导出常量给调用方
+// ============================================================
+
+export { TOOL_LABELS, ACTION_EMOJI };

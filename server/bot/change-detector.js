@@ -13,13 +13,12 @@
  */
 
 import db from '../db/init.js';
-import { sendCard, getFeishuOpenIds } from './feishu.js';
+import { createAndSendCard, getFeishuOpenIds } from './feishu.js';
 import { setFlushHandler } from './event-bus.js';
 import { analyzeChanges, fallbackNotify } from './notify-llm.js';
 import {
-  buildLLMNotificationCard,
-  buildPersonalNotificationCard,
   buildNotificationCard,
+  buildPersonalCard,
 } from './card-templates.js';
 
 /**
@@ -55,7 +54,10 @@ async function handleBatch(batch) {
 
   // 群聊通知
   if (decision.group?.send && decision.group.message) {
-    const card = buildLLMNotificationCard(decision.group.message, batch.length);
+    const card = buildNotificationCard(decision.group.message, {
+      changeCount: batch.length,
+      changes: batch,
+    });
     await sendToGroups(card);
   }
 
@@ -78,7 +80,7 @@ async function sendToGroups(card) {
     .filter(Boolean);
 
   for (const chatId of chatIds) {
-    await sendCard(chatId, 'chat_id', card);
+    await createAndSendCard(chatId, 'chat_id', card);
   }
 }
 
@@ -96,8 +98,8 @@ async function sendToIndividuals(individuals) {
       console.warn(`[Detector] 用户 ${username} 无飞书绑定，跳过私聊`);
       continue;
     }
-    const card = buildPersonalNotificationCard(message);
-    await sendCard(openId, 'open_id', card);
+    const card = buildPersonalCard(message);
+    await createAndSendCard(openId, 'open_id', card);
   }
 }
 

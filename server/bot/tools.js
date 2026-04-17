@@ -11,8 +11,8 @@ import {
   getUmamiStats, getUmamiActive,
 } from '../mcp/proxy-ops.js';
 import db from '../db/init.js';
-import { sendCard } from './feishu.js';
-import { buildPersonalNotificationCard } from './card-templates.js';
+import { createAndSendCard } from './feishu.js';
+import { buildPersonalCard } from './card-templates.js';
 
 // ── 工具定义（Anthropic / MiniMax 兼容格式）──
 
@@ -170,8 +170,8 @@ export async function executeTool(name, input = {}) {
       }
 
       // 发送个性化通知卡片
-      const card = buildPersonalNotificationCard(message);
-      await sendCard(user.feishu_open_id, 'open_id', card);
+      const card = buildPersonalCard(message);
+      await createAndSendCard(user.feishu_open_id, 'open_id', card);
 
       return { sent: true, target: target_username, displayName: user.display_name };
     }

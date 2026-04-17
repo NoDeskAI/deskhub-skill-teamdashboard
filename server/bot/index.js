@@ -1,9 +1,29 @@
 /**
  * 飞书 LLM 机器人入口
- * 卡片实时更新：一张卡片从思考→工具调用→最终结果全程原地更新
+ *
+ * 卡片流式生命周期（CardKit）：
+ *   1. 用户发消息
+ *   2. 第一个 chunk 到达 → createCardEntity + sendCardById（拿 card_id）
+ *   3. thinking_chunks → 插入 thinking_panel + 流式推 thinking_text
+ *   4. 首个 text_chunk → 收起 thinking_panel
+ *   5. tool_start → 插入 tool_panel + 推 tool_progress
+ *   6. tool_done → 更新 tool_progress（✅ 替换 ⏳）
+ *   7. text_chunks → 流式推 main_text
+ *   8. complete → 收起 tool_panel + closeStreamingMode
+ *
+ * 节流：per-element 500ms 或 50 字符强制 flush
  */
 
-import { initFeishu, sendCardGetId, updateCard, sendCard } from './feishu.js';
+import {
+  initFeishu,
+  createAndSendCard,
+  createCardEntity,
+  sendCardById,
+  streamCardText,
+  insertCardElements,
+  patchCardElement,
+  closeStreamingMode,
+} from './feishu.js';
 import { chat } from './llm.js';
 import { getSession, updateSession, startSessionCleanup } from './session.js';
 import { startChangeDetector } from './change-detector.js';
@@ -11,11 +31,17 @@ import { startPatrol } from './patrol.js';
 import { enqueueMessage } from './concurrency.js';
 import { getUserByOpenId, bindFeishuUser } from '../mcp/db-ops.js';
 import {
-  buildProgressCard,
-  buildFinalCard,
-  buildReplyCard,
-  buildErrorCard,
+  buildChatCardInitial,
+  buildThinkingPanel,
+  buildToolPanel,
+  buildToolPanelDonePatch,
+  buildToolProgressMarkdown,
+  buildSimpleCard,
+  THINKING_PANEL_DONE_PATCH,
 } from './card-templates.js';
+
+const THROTTLE_MS = 500;
+const FLUSH_AT_CHARS = 50;
 
 /**
  * 启动飞书机器人
@@ -40,180 +66,251 @@ export async function startBot() {
   }
 }
 
-/**
- * 处理收到的飞书消息
- * 卡片生命周期：
- *   1. 模型直接回复（不用工具）→ 一张卡片完事
- *   2. 模型需要工具 → 先发"思考中"卡片 → 更新进度 → 更新为最终结果
- */
+// ============================================================
+//  ChatCardStreamer — 单条消息处理过程中的卡片状态机
+// ============================================================
+
+class ChatCardStreamer {
+  constructor(receiveId, receiveIdType) {
+    this.receiveId = receiveId;
+    this.receiveIdType = receiveIdType;
+    this.cardId = null;
+    this.messageId = null;
+
+    this.runningText = '';        // 当前轮答案，轮间重置
+    this.runningThinking = '';    // 全局思考链
+    this.currentToolSteps = [];
+
+    this.thinkingPanelInserted = false;
+    this.toolPanelInserted = false;
+    this.thinkingCollapsed = false;
+
+    // per-element 节流：elementId -> { lastFlushTime, lastFlushedLen, timer }
+    this.flushState = new Map();
+  }
+
+  async ensureCardCreated() {
+    if (this.cardId) return true;
+    this.cardId = await createCardEntity(buildChatCardInitial());
+    if (!this.cardId) {
+      console.error('[Bot] 创建卡片实体失败');
+      return false;
+    }
+    this.messageId = await sendCardById(this.receiveId, this.receiveIdType, this.cardId);
+    return true;
+  }
+
+  async ensureThinkingPanel() {
+    if (this.thinkingPanelInserted) return;
+    if (!(await this.ensureCardCreated())) return;
+    const ok = await insertCardElements(this.cardId, buildThinkingPanel(), {
+      type: 'insert_before',
+      targetElementId: 'main_text',
+    });
+    if (ok) this.thinkingPanelInserted = true;
+  }
+
+  async ensureToolPanel() {
+    if (this.toolPanelInserted) return;
+    if (!(await this.ensureCardCreated())) return;
+    const ok = await insertCardElements(this.cardId, buildToolPanel(), {
+      type: 'insert_before',
+      targetElementId: 'main_text',
+    });
+    if (ok) this.toolPanelInserted = true;
+  }
+
+  async collapseThinking() {
+    if (!this.thinkingPanelInserted || this.thinkingCollapsed || !this.cardId) return;
+    this.thinkingCollapsed = true;
+    await patchCardElement(this.cardId, 'thinking_panel', THINKING_PANEL_DONE_PATCH);
+  }
+
+  // ── 节流推送 ──
+  _state(elementId) {
+    let st = this.flushState.get(elementId);
+    if (!st) {
+      st = { lastFlushTime: 0, lastFlushedLen: 0, timer: null };
+      this.flushState.set(elementId, st);
+    }
+    return st;
+  }
+
+  scheduleFlush(elementId, getContent) {
+    const st = this._state(elementId);
+    const content = getContent();
+    const newChars = content.length - st.lastFlushedLen;
+    const elapsed = Date.now() - st.lastFlushTime;
+
+    if (elapsed >= THROTTLE_MS || newChars >= FLUSH_AT_CHARS) {
+      return this.flushElement(elementId, content);
+    }
+
+    if (!st.timer) {
+      const wait = Math.max(0, THROTTLE_MS - elapsed);
+      st.timer = setTimeout(() => {
+        st.timer = null;
+        this.flushElement(elementId, getContent()).catch(err => {
+          console.error(`[Bot] trailing flush ${elementId} 失败:`, err.message);
+        });
+      }, wait);
+    }
+  }
+
+  async flushElement(elementId, content) {
+    const st = this._state(elementId);
+    if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+    st.lastFlushTime = Date.now();
+    st.lastFlushedLen = content.length;
+
+    if (!this.cardId) return;
+    await streamCardText(this.cardId, elementId, content);
+  }
+
+  cancelAllPending() {
+    for (const st of this.flushState.values()) {
+      if (st.timer) { clearTimeout(st.timer); st.timer = null; }
+    }
+  }
+
+  // ── 事件处理 ──
+
+  async onThinkingChunk(delta) {
+    this.runningThinking += delta;
+    await this.ensureThinkingPanel();
+    this.scheduleFlush('thinking_text', () => this.runningThinking);
+  }
+
+  async onTextChunk(delta) {
+    this.runningText += delta;
+    await this.ensureCardCreated();
+    // 首个答案 chunk 触发收起思考面板（fire & forget，不阻塞 chunk 流）
+    if (this.thinkingPanelInserted && !this.thinkingCollapsed) {
+      this.collapseThinking().catch(() => {});
+    }
+    this.scheduleFlush('main_text', () => this.runningText);
+  }
+
+  async onToolStart(toolSteps) {
+    this.currentToolSteps = toolSteps || [];
+    await this.ensureCardCreated();
+    await this.ensureToolPanel();
+    await this.collapseThinking();
+    await this.flushElement('tool_progress', buildToolProgressMarkdown(this.currentToolSteps));
+  }
+
+  async onToolDone(toolSteps) {
+    this.currentToolSteps = toolSteps || [];
+    if (this.toolPanelInserted) {
+      await this.flushElement('tool_progress', buildToolProgressMarkdown(this.currentToolSteps));
+    }
+    this.runningText = '';   // 下一轮文本重新累积
+  }
+
+  async onComplete(finalText) {
+    this.cancelAllPending();
+    if (!this.cardId) {
+      // 整个流式过程没产生任何 chunks（极少见），降级一次性发送
+      await createAndSendCard(this.receiveId, this.receiveIdType,
+        buildSimpleCard(finalText, { level: 'info' }));
+      return;
+    }
+    await this.collapseThinking();
+    await this.flushElement('main_text', finalText);
+    if (this.toolPanelInserted) {
+      await patchCardElement(this.cardId, 'tool_panel',
+        buildToolPanelDonePatch(this.currentToolSteps.length));
+    }
+    await closeStreamingMode(this.cardId);
+  }
+
+  async onDirectReply(finalText) {
+    this.cancelAllPending();
+    if (!this.cardId) {
+      // 没用工具且没产 chunks → 直接一次性发
+      await createAndSendCard(this.receiveId, this.receiveIdType,
+        buildSimpleCard(finalText, { level: 'info' }));
+      return;
+    }
+    await this.collapseThinking();
+    await this.flushElement('main_text', finalText);
+    await closeStreamingMode(this.cardId);
+  }
+
+  async onError(text) {
+    this.cancelAllPending();
+    if (this.cardId) {
+      await this.flushElement('main_text', text);
+      await closeStreamingMode(this.cardId);
+    } else {
+      await createAndSendCard(this.receiveId, this.receiveIdType,
+        buildSimpleCard(text, { level: 'error' }));
+    }
+  }
+}
+
+// ============================================================
+//  消息处理
+// ============================================================
+
 async function handleMessage(text, chatId, userId, chatType) {
   const receiveId = chatType === 'p2p' ? userId : chatId;
   const receiveIdType = chatType === 'p2p' ? 'open_id' : 'chat_id';
 
-  // ── 绑定指令（在排队之前快速响应，密码不经过 LLM）──
+  // ── 绑定指令（不经过 LLM）──
   const bindMatch = text.match(/^绑定\s+(\S+)\s+(\S+)$/);
   if (bindMatch) {
     if (chatType !== 'p2p') {
-      await sendCard(receiveId, receiveIdType,
-        buildReplyCard('请私聊我来绑定账号，避免密码泄露~')
-      );
+      await createAndSendCard(receiveId, receiveIdType,
+        buildSimpleCard('请私聊我来绑定账号，避免密码泄露~', { level: 'warn' }));
       return;
     }
     const [, username, password] = bindMatch;
     const result = bindFeishuUser(username, password, userId);
     if (result.ok) {
-      await sendCard(receiveId, receiveIdType,
-        buildReplyCard(`绑定成功！你好 ${result.displayName}，以后工单有动态我会通知你。`)
-      );
+      await createAndSendCard(receiveId, receiveIdType,
+        buildSimpleCard(`绑定成功！你好 ${result.displayName}，以后工单有动态我会通知你。`,
+          { level: 'success' }));
     } else {
-      await sendCard(receiveId, receiveIdType,
-        buildReplyCard(`绑定失败：${result.reason}。格式：绑定 用户名 密码`)
-      );
+      await createAndSendCard(receiveId, receiveIdType,
+        buildSimpleCard(`绑定失败：${result.reason}。\n\n格式：\`绑定 用户名 密码\``,
+          { level: 'warn' }));
     }
     return;
   }
 
   const { status } = await enqueueMessage(userId, async () => {
-    // 查询绑定状态
     const boundUser = getUserByOpenId(userId);
-
-    // ── 流式卡片状态 ──
-    // 卡片仍走旧 message.patch（CardKit 改造放下一轮）
-    // 节流策略：1500ms 或 80 字符强制刷新一次。8 轮工具循环最多 ~30 次 patch，紧贴上限但够用。
-    let cardMessageId = null;
-    let runningText = '';        // 当前轮模型说的话（chunks 累积），轮间重置
-    let runningThinking = '';    // 全局思考链，跨轮累加
-    let currentToolSteps = [];   // 工具步骤快照
-    let lastFlushTime = 0;
-    let charsSinceFlush = 0;
-    let pendingTimer = null;
-
-    const THROTTLE_MS = 1500;
-    const FLUSH_AT_CHARS = 80;
-
-    function cancelPending() {
-      if (pendingTimer) {
-        clearTimeout(pendingTimer);
-        pendingTimer = null;
-      }
-    }
-
-    async function flushCard() {
-      cancelPending();
-      charsSinceFlush = 0;
-      lastFlushTime = Date.now();
-
-      const card = buildProgressCard(runningText, currentToolSteps, runningThinking);
-      try {
-        if (cardMessageId) {
-          await updateCard(cardMessageId, card);
-        } else {
-          cardMessageId = await sendCardGetId(receiveId, receiveIdType, card);
-        }
-      } catch (err) {
-        console.error('[Bot] 流式卡片刷新失败:', err.message);
-      }
-    }
-
-    function scheduleFlush() {
-      if (pendingTimer) return;
-      pendingTimer = setTimeout(() => {
-        pendingTimer = null;
-        flushCard().catch(() => {});
-      }, THROTTLE_MS);
-    }
-
-    async function onChunk(chunk) {
-      charsSinceFlush += chunk.length;
-      const elapsed = Date.now() - lastFlushTime;
-      if (elapsed >= THROTTLE_MS || charsSinceFlush >= FLUSH_AT_CHARS) {
-        await flushCard();
-      } else {
-        scheduleFlush();
-      }
-    }
+    const streamer = new ChatCardStreamer(receiveId, receiveIdType);
 
     const onProgress = async (event) => {
-      switch (event.type) {
-        case 'text_chunk': {
-          if (!event.delta) break;
-          runningText += event.delta;
-          await onChunk(event.delta);
-          break;
+      try {
+        switch (event.type) {
+          case 'text_chunk':
+            if (event.delta) await streamer.onTextChunk(event.delta);
+            break;
+          case 'thinking_chunk':
+            if (event.delta) await streamer.onThinkingChunk(event.delta);
+            break;
+          case 'tool_start':
+            await streamer.onToolStart(event.toolSteps);
+            break;
+          case 'tool_done':
+            await streamer.onToolDone(event.toolSteps);
+            break;
+          case 'complete':
+            await streamer.onComplete(event.text);
+            break;
+          case 'direct_reply':
+            await streamer.onDirectReply(event.text);
+            break;
+          case 'error':
+            await streamer.onError(event.text);
+            break;
+          // 'thinking' 一次性事件被流式 chunks 取代，忽略
         }
-
-        case 'thinking_chunk': {
-          if (!event.delta) break;
-          runningThinking += event.delta;
-          await onChunk(event.delta);
-          break;
-        }
-
-        case 'thinking': {
-          // 兜底：若流式 chunks 没到（极少见），用一次性事件填充
-          if (!runningText && event.text) runningText = event.text;
-          if (!runningThinking && event.thinkingContent) runningThinking = event.thinkingContent;
-          if (!cardMessageId || charsSinceFlush > 0) await flushCard();
-          break;
-        }
-
-        case 'tool_start': {
-          currentToolSteps = event.toolSteps || [];
-          await flushCard();
-          break;
-        }
-
-        case 'tool_done': {
-          currentToolSteps = event.toolSteps || [];
-          await flushCard();
-          runningText = '';   // 下一轮 chunks 从零累积
-          break;
-        }
-
-        case 'complete': {
-          cancelPending();
-          const card = buildFinalCard(event.text);
-          try {
-            if (cardMessageId) {
-              await updateCard(cardMessageId, card);
-            } else {
-              await sendCard(receiveId, receiveIdType, card);
-            }
-          } catch (err) {
-            console.error('[Bot] 最终卡片更新失败:', err.message);
-          }
-          break;
-        }
-
-        case 'direct_reply': {
-          cancelPending();
-          const card = buildReplyCard(event.text);
-          try {
-            if (cardMessageId) {
-              await updateCard(cardMessageId, card);
-            } else {
-              await sendCard(receiveId, receiveIdType, card);
-            }
-          } catch (err) {
-            console.error('[Bot] 直接回复卡片失败:', err.message);
-          }
-          break;
-        }
-
-        case 'error': {
-          cancelPending();
-          const card = buildErrorCard(event.text);
-          try {
-            if (cardMessageId) {
-              await updateCard(cardMessageId, card);
-            } else {
-              await sendCard(receiveId, receiveIdType, card);
-            }
-          } catch (err) {
-            console.error('[Bot] 错误卡片发送失败:', err.message);
-          }
-          break;
-        }
+      } catch (err) {
+        console.error(`[Bot] onProgress(${event.type}) 错误:`, err.message);
       }
     };
 
@@ -223,19 +320,12 @@ async function handleMessage(text, chatId, userId, chatType) {
       updateSession(userId, text, reply, toolSummaries);
     } catch (err) {
       console.error('[Bot] 消息处理错误:', err);
-      const card = buildErrorCard('抱歉，我暂时无法处理请求，请稍后再试。');
-      if (cardMessageId) {
-        await updateCard(cardMessageId, card);
-      } else {
-        await sendCard(receiveId, receiveIdType, card);
-      }
+      await streamer.onError('抱歉，我暂时无法处理请求，请稍后再试。').catch(() => {});
     }
   });
 
-  // 背压：队列已满时回复友好提示
   if (status === 'backpressure') {
-    await sendCard(receiveId, receiveIdType,
-      buildReplyCard('我还在处理你之前的消息，稍等一下~')
-    );
+    await createAndSendCard(receiveId, receiveIdType,
+      buildSimpleCard('我还在处理你之前的消息，稍等一下~', { level: 'info' }));
   }
 }
