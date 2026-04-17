@@ -13,3 +13,8 @@ server/uploads/
 
 mcp-server/
 mcp-server 2/
+
+# 重构参考资料（不入库）
+anthropic-sdk/
+json2.0/
+飞书卡片与LLM流式重构调查报告.md

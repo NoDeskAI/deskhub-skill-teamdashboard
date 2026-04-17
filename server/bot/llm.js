@@ -1,13 +1,19 @@
 /**
  * MiniMax M2.7 调用层
- * Anthropic 兼容接口，原生 fetch，tool use 循环
+ * Anthropic 兼容接口，原生 fetch，SSE 流式，tool use 循环
+ *
+ * 流式说明：
+ * - 请求体带 stream: true，按 Anthropic SSE 协议解析事件
+ * - text_delta / thinking_delta 增量回调（text_chunk / thinking_chunk 事件）
+ * - input_json_delta 累积成完整 input，与非流式 content 结构对齐
+ * - 流结束后产出 { content, stop_reason, usage }，后续 toolUseLoop 逻辑零改动
  */
 
 import { TOOL_DEFINITIONS, TOOL_DEFINITIONS_CHAT_ONLY, executeTool } from './tools.js';
 
 const API_URL = 'https://api.minimaxi.com/anthropic/v1/messages';
 const MAX_TOOL_ROUNDS = 8;
-const REQUEST_TIMEOUT = 30000;
+const REQUEST_TIMEOUT = 60000;  // 流式整体读取上限
 const MAX_TOKENS = 8192;  // 给复杂回复（周报、多工单对比）留足空间
 
 function buildSystemPrompt(boundUser = null, toolLog = []) {
@@ -88,12 +94,14 @@ const ERROR_MESSAGE = '抱歉，我暂时无法处理请求，请稍后再试。
 
 /**
  * 进度事件类型：
- *  { type: 'thinking',     text: '我看看PPT的情况' }
- *  { type: 'tool_start',   tools: ['get_plan_detail'] }
- *  { type: 'tool_done',    tools: ['get_plan_detail'] }
- *  { type: 'complete',     text: '最终回复', thinkingText, toolSteps }
- *  { type: 'error',        text: '错误信息' }
- *  { type: 'direct_reply', text: '不需要工具的直接回复' }
+ *  { type: 'text_chunk',    delta: '增量文本',   index: contentBlockIndex }   // 流式：模型每吐一段文本
+ *  { type: 'thinking_chunk',delta: '增量思考',   index: contentBlockIndex }   // 流式：模型每吐一段思考
+ *  { type: 'thinking',      text, thinkingContent }                            // 一轮结束，模型决定调工具
+ *  { type: 'tool_start',    tools, thinkingText, thinkingContent, toolSteps } // 开始执行工具
+ *  { type: 'tool_done',     tools, thinkingText, thinkingContent, toolSteps } // 工具执行完
+ *  { type: 'complete',      text, thinkingText, toolSteps }                    // 完成（用了工具）
+ *  { type: 'direct_reply',  text }                                              // 完成（没用工具）
+ *  { type: 'error',         text }
  */
 
 /**
@@ -128,6 +136,138 @@ export async function chat(userText, history = [], onProgress = null, boundUser 
   }
 }
 
+/**
+ * 调一次 messages 接口（流式）
+ * @param {string} apiKey
+ * @param {object} body - messages 请求体（不含 stream 字段）
+ * @param {Function} emitChunk - (kind, delta, index) => Promise<void>，kind ∈ 'text' | 'thinking'
+ * @returns {Promise<{ content: Array, stop_reason: string|null, usage: object|null }>}
+ *   返回结构与非流式 response.json() 完全一致，方便 toolUseLoop 透明使用
+ */
+async function streamMessage(apiKey, body, emitChunk) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+  let response;
+  try {
+    response = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        'accept': 'text/event-stream',
+      },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+
+  if (!response.ok) {
+    clearTimeout(timer);
+    const errText = await response.text().catch(() => '');
+    throw new Error(`MiniMax API ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const blocks = [];           // index -> 重组后的 content block
+  const toolJsonBuf = [];      // index -> tool_use 的 partial_json 累积
+  let stopReason = null;
+  let usage = null;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // 按 SSE 规范，事件以 \n\n 分隔
+      const events = buffer.split('\n\n');
+      buffer = events.pop();   // 末尾未完整的留到下次
+
+      for (const ev of events) {
+        const dataLine = ev.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        const payload = dataLine.replace(/^data:\s*/, '').trim();
+        if (!payload || payload === '[DONE]') continue;
+
+        let data;
+        try { data = JSON.parse(payload); } catch { continue; }
+
+        switch (data.type) {
+          case 'content_block_start': {
+            const i = data.index;
+            blocks[i] = { ...data.content_block };
+            if (data.content_block?.type === 'tool_use') {
+              toolJsonBuf[i] = '';
+            }
+            break;
+          }
+
+          case 'content_block_delta': {
+            const i = data.index;
+            const d = data.delta;
+            if (!blocks[i] || !d) break;
+
+            if (d.type === 'text_delta') {
+              blocks[i].text = (blocks[i].text || '') + (d.text || '');
+              if (d.text) await emitChunk('text', d.text, i);
+            } else if (d.type === 'thinking_delta') {
+              blocks[i].thinking = (blocks[i].thinking || '') + (d.thinking || '');
+              if (d.thinking) await emitChunk('thinking', d.thinking, i);
+            } else if (d.type === 'input_json_delta') {
+              toolJsonBuf[i] = (toolJsonBuf[i] || '') + (d.partial_json || '');
+            }
+            break;
+          }
+
+          case 'content_block_stop': {
+            const i = data.index;
+            if (blocks[i]?.type === 'tool_use') {
+              try {
+                blocks[i].input = JSON.parse(toolJsonBuf[i] || '{}');
+              } catch (err) {
+                console.warn('[Bot/LLM] tool_use input JSON 解析失败:', err.message, 'raw:', toolJsonBuf[i]?.slice(0, 200));
+                blocks[i].input = {};
+              }
+            }
+            break;
+          }
+
+          case 'message_delta': {
+            if (data.delta?.stop_reason) stopReason = data.delta.stop_reason;
+            if (data.usage) usage = data.usage;
+            break;
+          }
+
+          case 'message_start':
+          case 'message_stop':
+          case 'ping':
+            break;
+
+          default:
+            // 未知事件类型，忽略
+            break;
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return {
+    content: blocks.filter(Boolean),
+    stop_reason: stopReason,
+    usage,
+  };
+}
+
 async function toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools, toolLog) {
   let thinkingText = '';
   let thinkingEmitted = false;
@@ -144,31 +284,13 @@ async function toolUseLoop(apiKey, model, messages, onProgress, boundUser, tools
       messages,
     };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
-
-    let response;
-    try {
-      response = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'content-type': 'application/json',
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`MiniMax API ${response.status}: ${errText.slice(0, 200)}`);
-    }
-
-    const data = await response.json();
+    const data = await streamMessage(apiKey, body, async (kind, delta, index) => {
+      if (kind === 'text') {
+        await emit({ type: 'text_chunk', delta, index });
+      } else if (kind === 'thinking') {
+        await emit({ type: 'thinking_chunk', delta, index });
+      }
+    });
 
     // 保留完整 assistant 响应到历史
     messages.push({ role: 'assistant', content: data.content });

@@ -11,7 +11,6 @@ import { startPatrol } from './patrol.js';
 import { enqueueMessage } from './concurrency.js';
 import { getUserByOpenId, bindFeishuUser } from '../mcp/db-ops.js';
 import {
-  buildThinkingCard,
   buildProgressCard,
   buildFinalCard,
   buildReplyCard,
@@ -78,56 +77,140 @@ async function handleMessage(text, chatId, userId, chatType) {
     // 查询绑定状态
     const boundUser = getUserByOpenId(userId);
 
+    // ── 流式卡片状态 ──
+    // 卡片仍走旧 message.patch（CardKit 改造放下一轮）
+    // 节流策略：1500ms 或 80 字符强制刷新一次。8 轮工具循环最多 ~30 次 patch，紧贴上限但够用。
     let cardMessageId = null;
+    let runningText = '';        // 当前轮模型说的话（chunks 累积），轮间重置
+    let runningThinking = '';    // 全局思考链，跨轮累加
+    let currentToolSteps = [];   // 工具步骤快照
+    let lastFlushTime = 0;
+    let charsSinceFlush = 0;
+    let pendingTimer = null;
+
+    const THROTTLE_MS = 1500;
+    const FLUSH_AT_CHARS = 80;
+
+    function cancelPending() {
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+    }
+
+    async function flushCard() {
+      cancelPending();
+      charsSinceFlush = 0;
+      lastFlushTime = Date.now();
+
+      const card = buildProgressCard(runningText, currentToolSteps, runningThinking);
+      try {
+        if (cardMessageId) {
+          await updateCard(cardMessageId, card);
+        } else {
+          cardMessageId = await sendCardGetId(receiveId, receiveIdType, card);
+        }
+      } catch (err) {
+        console.error('[Bot] 流式卡片刷新失败:', err.message);
+      }
+    }
+
+    function scheduleFlush() {
+      if (pendingTimer) return;
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        flushCard().catch(() => {});
+      }, THROTTLE_MS);
+    }
+
+    async function onChunk(chunk) {
+      charsSinceFlush += chunk.length;
+      const elapsed = Date.now() - lastFlushTime;
+      if (elapsed >= THROTTLE_MS || charsSinceFlush >= FLUSH_AT_CHARS) {
+        await flushCard();
+      } else {
+        scheduleFlush();
+      }
+    }
 
     const onProgress = async (event) => {
       switch (event.type) {
+        case 'text_chunk': {
+          if (!event.delta) break;
+          runningText += event.delta;
+          await onChunk(event.delta);
+          break;
+        }
+
+        case 'thinking_chunk': {
+          if (!event.delta) break;
+          runningThinking += event.delta;
+          await onChunk(event.delta);
+          break;
+        }
+
         case 'thinking': {
-          const card = buildThinkingCard(event.text, event.thinkingContent);
-          cardMessageId = await sendCardGetId(receiveId, receiveIdType, card);
+          // 兜底：若流式 chunks 没到（极少见），用一次性事件填充
+          if (!runningText && event.text) runningText = event.text;
+          if (!runningThinking && event.thinkingContent) runningThinking = event.thinkingContent;
+          if (!cardMessageId || charsSinceFlush > 0) await flushCard();
           break;
         }
 
         case 'tool_start': {
-          const card = buildProgressCard(event.thinkingText, event.toolSteps, event.thinkingContent);
-          if (cardMessageId) {
-            await updateCard(cardMessageId, card);
-          } else {
-            cardMessageId = await sendCardGetId(receiveId, receiveIdType, card);
-          }
+          currentToolSteps = event.toolSteps || [];
+          await flushCard();
           break;
         }
 
         case 'tool_done': {
-          if (cardMessageId) {
-            const card = buildProgressCard(event.thinkingText, event.toolSteps, event.thinkingContent);
-            await updateCard(cardMessageId, card);
-          }
+          currentToolSteps = event.toolSteps || [];
+          await flushCard();
+          runningText = '';   // 下一轮 chunks 从零累积
           break;
         }
 
         case 'complete': {
+          cancelPending();
           const card = buildFinalCard(event.text);
-          if (cardMessageId) {
-            await updateCard(cardMessageId, card);
-          } else {
-            await sendCard(receiveId, receiveIdType, card);
+          try {
+            if (cardMessageId) {
+              await updateCard(cardMessageId, card);
+            } else {
+              await sendCard(receiveId, receiveIdType, card);
+            }
+          } catch (err) {
+            console.error('[Bot] 最终卡片更新失败:', err.message);
           }
           break;
         }
 
         case 'direct_reply': {
+          cancelPending();
           const card = buildReplyCard(event.text);
-          await sendCard(receiveId, receiveIdType, card);
+          try {
+            if (cardMessageId) {
+              await updateCard(cardMessageId, card);
+            } else {
+              await sendCard(receiveId, receiveIdType, card);
+            }
+          } catch (err) {
+            console.error('[Bot] 直接回复卡片失败:', err.message);
+          }
           break;
         }
 
         case 'error': {
+          cancelPending();
           const card = buildErrorCard(event.text);
-          if (cardMessageId) {
-            await updateCard(cardMessageId, card);
-          } else {
-            await sendCard(receiveId, receiveIdType, card);
+          try {
+            if (cardMessageId) {
+              await updateCard(cardMessageId, card);
+            } else {
+              await sendCard(receiveId, receiveIdType, card);
+            }
+          } catch (err) {
+            console.error('[Bot] 错误卡片发送失败:', err.message);
           }
           break;
         }
