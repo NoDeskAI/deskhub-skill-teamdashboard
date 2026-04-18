@@ -340,6 +340,8 @@ class ChatCardStreamer {
     const durationSec = (Date.now() - startTs) / 1000;
     const rawThinking = this.runningThinkingByRound.get(round) || '';
 
+    console.log(`[Bot/Stream] collapsePillWithSummary round=${round} thinking_len=${rawThinking.length} duration=${durationSec.toFixed(1)}s`);
+
     // 先同步 mutate _bodyElements 的胶囊条目（兜底无摘要版本），保证 onComplete 时有收起态
     this._mutatePillInBody(pillId, null, durationSec);
 
@@ -352,16 +354,27 @@ class ChatCardStreamer {
     });
 
     // 异步跑摘要模型
+    console.log(`[Bot/Summary] 发起摘要请求 round=${round} input=${rawThinking.length}字`);
     summarizeThinking(rawThinking).then(summary => {
+      console.log(`[Bot/Summary] round=${round} 返回 result=${summary ? `"${summary}"` : 'null'}`);
       if (!summary) return;
       // 同步 mutate _bodyElements（用摘要覆盖）
       this._mutatePillInBody(pillId, summary, durationSec);
       this._enqueue(`patch pill summary r${round}`, async () => {
-        if (!capturedCardId || this.cardId !== capturedCardId) return;
+        if (!capturedCardId) {
+          console.warn(`[Bot/Stream] patch pill summary r${round} 跳过（cardId 为空）`);
+          return;
+        }
+        if (this.cardId !== capturedCardId) {
+          console.warn(`[Bot/Stream] patch pill summary r${round} 跳过（cardId 已换）`);
+          return;
+        }
         await patchCardElement(capturedCardId, pillId, buildPillCollapsePatch(summary, durationSec));
-        console.log(`[Bot/Stream] ${pillId} 摘要已填充`);
+        console.log(`[Bot/Stream] ${pillId} 摘要已填充 → "${summary}"`);
       });
-    }).catch(() => {});
+    }).catch(err => {
+      console.warn(`[Bot/Summary] round=${round} .then 异常:`, err?.message || err);
+    });
   }
 
   /** 就地 mutate _bodyElements 中指定胶囊的 expanded + title，保 onComplete 时 card.update 带正确状态 */
@@ -782,10 +795,10 @@ async function handleMessage(text, chatId, userId, chatType) {
   const { status } = await enqueueMessage(userId, async () => {
     const boundUser = getUserByOpenId(userId);
 
-    // ── Header 模式分支（Stage C）──
-    // BOT_HEADER_MODE=llm（默认）：Stage C，LLM 用 [[header:...]] markup 自选，TTFP 延后 2s 兜底
-    // BOT_HEADER_MODE=preset     ：回退 Stage A/B 路径，关键词预判场景 + 预创建卡片保 TTFP
-    const headerMode = (process.env.BOT_HEADER_MODE || 'llm').toLowerCase();
+    // ── Header 模式分支 ──
+    // BOT_HEADER_MODE=preset（默认）：关键词预判场景包 + 预创建卡片保 TTFP
+    // BOT_HEADER_MODE=llm           ：LLM 用 [[header:...]] markup 自选（实验性，MiniMax 遵循度低）
+    const headerMode = (process.env.BOT_HEADER_MODE || 'preset').toLowerCase();
     let streamer;
 
     if (headerMode === 'preset') {
