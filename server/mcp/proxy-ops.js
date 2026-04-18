@@ -225,6 +225,13 @@ export async function listDeskclawTools() {
   return data;
 }
 
+/** 按 name 精确查一个 MCP 工具（markup [[mcp:X]] 渲染用），走 listDeskclawTools 的缓存 */
+export async function getMcpToolByName(name) {
+  if (!name) return null;
+  const tools = await listDeskclawTools();
+  return tools.find(t => t.name === name) || null;
+}
+
 export async function getDeskclawHealth() {
   const rpc = await deskclawCall('tools/call', { name: 'get_health', arguments: {} });
   const content = rpc.result?.content?.[0]?.text;

@@ -276,11 +276,29 @@ export function deleteDimension(dimensionId) {
 // ============================================================
 
 export function listUsers() {
-  const users = db.prepare('SELECT id, username, role, display_name, created_at FROM users ORDER BY created_at').all();
+  const users = db.prepare('SELECT id, username, role, display_name, feishu_open_id, created_at FROM users ORDER BY created_at').all();
   return users.map(u => ({
     id: u.id, username: u.username, role: u.role,
-    displayName: u.display_name || u.username, created: u.created_at,
+    displayName: u.display_name || u.username,
+    feishuOpenId: u.feishu_open_id || '',
+    created: u.created_at,
   }));
+}
+
+/** 按 username 或 display_name 精确查一个用户（markup [[user:X]] 渲染用） */
+export function getUserByUsername(nameOrDisplay) {
+  if (!nameOrDisplay) return null;
+  const row = db.prepare(
+    'SELECT id, username, role, display_name, feishu_open_id FROM users WHERE username = ? OR display_name = ? LIMIT 1'
+  ).get(nameOrDisplay, nameOrDisplay);
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    role: row.role,
+    displayName: row.display_name || row.username,
+    feishuOpenId: row.feishu_open_id || '',
+  };
 }
 
 export function createUser({ username, password, role = 'member', displayName = '' }) {

@@ -163,7 +163,8 @@ export function buildChatCardInitial(scene = 'default') {
 }
 
 /**
- * 思考胶囊（瞬态，每轮独立）
+ * 思考胶囊 — 展开态（思考中）
+ * 胶囊在文本开始时不再删除，而是 patch 成收起态带摘要（见 buildPillCollapsePatch）
  * @param {number} round - 轮次，element_id 带 round 后缀
  */
 export function buildThinkingPill(round) {
@@ -177,9 +178,9 @@ export function buildThinkingPill(round) {
       background_color: 'default',
       padding: '2px 12px 8px 12px',
       margin: '4px 0 8px 0',
-      border: { color: 'grey-200', corner_radius: '16px' },
+      border: { corner_radius: '12px' },
       header: {
-        title: { tag: 'markdown', content: "<font color='grey'>● 思考中...</font>" },
+        title: { tag: 'markdown', content: "● 思考中..." },
         vertical_align: 'center',
         padding: '4px 8px 4px 8px',
         icon: { tag: 'standard_icon', token: 'add_outlined', size: '12px 12px', color: 'grey' },
@@ -196,6 +197,24 @@ export function buildThinkingPill(round) {
       ],
     },
   ];
+}
+
+/**
+ * 思考胶囊收起态 patch — 用 patchCardElement 局部更新
+ * @param {string|null} summary - 摘要文本（null 则只显示耗时）
+ * @param {number} durationSec - 思考耗时（秒）
+ */
+export function buildPillCollapsePatch(summary, durationSec) {
+  const dur = Number(durationSec).toFixed(1);
+  const title = summary
+    ? `● 思考 ${dur}s · ${summary}`
+    : `● 思考 ${dur}s`;
+  return {
+    expanded: false,
+    header: {
+      title: { tag: 'markdown', content: title },
+    },
+  };
 }
 
 /**

@@ -24,7 +24,7 @@ import {
   sendCardById,
   streamCardText,
   insertCardElements,
-  deleteCardElement,
+  patchCardElement,
   updateCardEntity,
   closeStreamingMode,
 } from './feishu.js';
@@ -37,10 +37,12 @@ import { getUserByOpenId, bindFeishuUser } from '../mcp/db-ops.js';
 import {
   buildChatCardInitial,
   buildThinkingPill,
+  buildPillCollapsePatch,
   buildCompletionCard,
   buildErrorCard,
   buildSimpleCard,
 } from './card-templates.js';
+import { summarizeThinking } from './summary-model.js';
 import {
   buildIconProbeCard,
   buildColorProbeCard,
@@ -124,11 +126,13 @@ class ChatCardStreamer {
 
     this.runningText = '';         // 跨轮累积（不清零）
     this.runningThinkingByRound = new Map();   // round → 该轮思考累积
+    this._thinkingStartByRound = new Map();    // round → 首 thinking chunk 时间戳
 
     // ── Promise 备忘锁 ──
     this._cardPromise = presetCardId ? Promise.resolve() : null;
     this._pillPromises = new Map();   // round → insert pill promise
-    this._currentPillRound = null;    // 当前屏幕上存在的思考胶囊的 round，无则 null
+    this._pillCollapsedRounds = new Set();  // 已触发收起的 round（防重复 patch）
+    this._currentPillRound = null;    // 当前屏幕上存在（未收起）的思考胶囊 round，无则 null
 
     // ── per-card FIFO op queue ──
     this._opQueue = Promise.resolve();
@@ -189,17 +193,39 @@ class ChatCardStreamer {
   }
 
   /**
-   * 删除某 round 的思考胶囊（text 首 chunk 到来触发）
+   * 把某 round 的思考胶囊收起并填摘要（替代旧的 deleteThinkingPill）
+   * 两次 patch：立即先用耗时兜底 patch，再异步跑摘要模型，回来覆盖 title
    */
-  deleteThinkingPill(round) {
-    if (round === null || round === undefined) return Promise.resolve();
+  collapsePillWithSummary(round) {
+    if (round === null || round === undefined) return;
+    if (this._pillCollapsedRounds.has(round)) return;   // 已收起过，不重复
     const pillPromise = this._pillPromises.get(round);
-    if (!pillPromise) return Promise.resolve();   // 该轮从未创建胶囊
-    return this._enqueue(`delete thinking_pill_r${round}`, async () => {
+    if (!pillPromise) return;   // 该轮根本没创建过胶囊
+    this._pillCollapsedRounds.add(round);
+
+    const capturedCardId = this.cardId;
+    const pillId = `thinking_pill_r${round}`;
+    const startTs = this._thinkingStartByRound.get(round) || this.startTime;
+    const durationSec = (Date.now() - startTs) / 1000;
+    const rawThinking = this.runningThinkingByRound.get(round) || '';
+
+    // 立即 enqueue 兜底 patch（仅耗时，无摘要）— 用户立刻看到胶囊收起
+    this._enqueue(`collapse pill fallback r${round}`, async () => {
       await pillPromise;   // 等胶囊真正存在
-      await deleteCardElement(this.cardId, `thinking_pill_r${round}`);
-      console.log(`[Bot/Stream] thinking_pill_r${round} 已删除`);
+      if (!capturedCardId) return;
+      await patchCardElement(capturedCardId, pillId, buildPillCollapsePatch(null, durationSec));
+      console.log(`[Bot/Stream] ${pillId} 已收起（兜底 duration=${durationSec.toFixed(1)}s）`);
     });
+
+    // 异步跑摘要模型（不进队列），回来后再 enqueue 覆盖 title
+    summarizeThinking(rawThinking).then(summary => {
+      if (!summary) return;   // 失败/超时：保留兜底的"● 思考 X.Xs"
+      this._enqueue(`patch pill summary r${round}`, async () => {
+        if (!capturedCardId || this.cardId !== capturedCardId) return;  // 卡片已换（极少见）
+        await patchCardElement(capturedCardId, pillId, buildPillCollapsePatch(summary, durationSec));
+        console.log(`[Bot/Stream] ${pillId} 摘要已填充`);
+      });
+    }).catch(() => {});
   }
 
   // ── 节流推送 ──
@@ -254,6 +280,10 @@ class ChatCardStreamer {
   // ── 事件处理 ──
 
   onThinkingChunk(delta, round = 0) {
+    // 记录该轮起始时间（首 chunk）
+    if (!this._thinkingStartByRound.has(round)) {
+      this._thinkingStartByRound.set(round, Date.now());
+    }
     // 累积到该轮的 thinking 池
     const cur = this.runningThinkingByRound.get(round) || '';
     this.runningThinkingByRound.set(round, cur + delta);
@@ -262,7 +292,7 @@ class ChatCardStreamer {
     if (this._currentPillRound !== round) {
       // 清理任何残留的旧胶囊（比如前一轮只有 thinking 没有 text，胶囊还留着）
       if (this._currentPillRound !== null && this._currentPillRound !== round) {
-        this.deleteThinkingPill(this._currentPillRound);
+        this.collapsePillWithSummary(this._currentPillRound);
       }
       this.ensureThinkingPillForRound(round).catch(() => {});
       this._currentPillRound = round;
@@ -275,11 +305,11 @@ class ChatCardStreamer {
     this.runningText += delta;
     this.ensureCardCreated().catch(() => {});
 
-    // 首个 text chunk 到来，删掉当前胶囊（如果有）
+    // 首个 text chunk 到来，收起当前胶囊（异步填摘要）
     if (this._currentPillRound !== null) {
-      const toDelete = this._currentPillRound;
+      const toCollapse = this._currentPillRound;
       this._currentPillRound = null;
-      this.deleteThinkingPill(toDelete);
+      this.collapsePillWithSummary(toCollapse);
     }
 
     this.scheduleFlush('main_text_0', () => this.runningText);
@@ -305,18 +335,18 @@ class ChatCardStreamer {
         buildSimpleCard(finalText, { level: 'info' }));
       return;
     }
-    // 清理残留胶囊（比如最后一轮只有 thinking 没有 text 就完成）
+    // 收起残留胶囊（比如最后一轮只有 thinking 没有 text 就完成）
     if (this._currentPillRound !== null) {
-      this.deleteThinkingPill(this._currentPillRound);
+      this.collapsePillWithSummary(this._currentPillRound);
       this._currentPillRound = null;
     }
     // 先流式把最终文本推完（保留打字机效果）
     this.flushElement('main_text_0', finalText);
 
-    // 等队列全部排完（insert/delete/stream 全部落地）
+    // 等队列全部排完（insert/patch/stream 全部落地，含胶囊摘要兜底 patch；摘要填充是后续 patch，可能还在 pending，此时不阻塞 card.update）
     await this._opQueue;
 
-    // card.update 整体切到完成态（header 变绿勾 + 完成 subtitle，body 保留 main_text_0）
+    // card.update 整体切到完成态（header 变绿勾 + 完成 subtitle，body 保留 main_text_0 —— 胶囊会被整体替换掉，摘要填充 patch 若晚到会 no-op 因为 element 已不存在）
     const durationMs = Date.now() - this.startTime;
     const finalCard = buildCompletionCard(this.scene, durationMs, finalText);
     await this._enqueue('final card.update', () => updateCardEntity(this.cardId, finalCard));
@@ -332,7 +362,7 @@ class ChatCardStreamer {
       return;
     }
     if (this._currentPillRound !== null) {
-      this.deleteThinkingPill(this._currentPillRound);
+      this.collapsePillWithSummary(this._currentPillRound);
       this._currentPillRound = null;
     }
     this.flushElement('main_text_0', finalText);
