@@ -43,6 +43,9 @@ import {
   buildSimpleCard,
 } from './card-templates.js';
 import { summarizeThinking } from './summary-model.js';
+import { MarkupStream } from './markup-parser.js';
+import { renderMarkup } from './markup-renderers.js';
+import { getUserByUsername } from '../mcp/db-ops.js';
 import {
   buildIconProbeCard,
   buildColorProbeCard,
@@ -124,7 +127,16 @@ class ChatCardStreamer {
     this.cardId = presetCardId;
     this.messageId = presetMessageId;
 
-    this.runningText = '';         // 跨轮累积（不清零）
+    // ── 多段 main_text 状态 ──
+    // _segments 和 _bodyElements 同步维护：每段对应一个 markdown element
+    // block markup 会在 _bodyElements 里插入一个"非段"元素（interactive_container/hr/...）
+    // onComplete 时直接用 _bodyElements 重建 final card body，保留所有嵌入组件
+    this._segments = [{ id: 'main_text_0', text: '' }];
+    this._bodyElements = [{ tag: 'markdown', element_id: 'main_text_0', content: '' }];
+    this._currentSegmentId = 'main_text_0';
+    this._markupStream = new MarkupStream();
+    this._blockMarkupCounter = 0;
+
     this.runningThinkingByRound = new Map();   // round → 该轮思考累积
     this._thinkingStartByRound = new Map();    // round → 首 thinking chunk 时间戳
 
@@ -302,7 +314,6 @@ class ChatCardStreamer {
   }
 
   onTextChunk(delta, round = 0) {
-    this.runningText += delta;
     this.ensureCardCreated().catch(() => {});
 
     // 首个 text chunk 到来，收起当前胶囊（异步填摘要）
@@ -312,7 +323,102 @@ class ChatCardStreamer {
       this.collapsePillWithSummary(toCollapse);
     }
 
-    this.scheduleFlush('main_text_0', () => this.runningText);
+    // 流式喂入 markup parser，拿回已定稿的 parts
+    const parts = this._markupStream.feed(delta);
+    for (const part of parts) {
+      if (part.kind === 'text') {
+        this._appendToCurrentSegment(part.text);
+      } else if (part.kind === 'markup' && part.placement === 'inline') {
+        this._appendToCurrentSegment(this._renderInlineSync(part.tag, part.args));
+      } else if (part.kind === 'markup' && part.placement === 'block') {
+        this._handleBlockMarkup(part.tag, part.args);
+      }
+    }
+  }
+
+  /** 把 text 追加到当前段，更新 body 镜像，调度 flush */
+  _appendToCurrentSegment(text) {
+    if (!text) return;
+    const seg = this._segments.find(s => s.id === this._currentSegmentId);
+    if (!seg) return;
+    seg.text += text;
+    // 镜像到 _bodyElements（最终 card.update 用）
+    const el = this._bodyElements.find(e => e.element_id === this._currentSegmentId);
+    if (el) el.content = seg.text;
+    // 流式推到飞书
+    this.scheduleFlush(seg.id, () => seg.text);
+  }
+
+  /** 内联 markup 同步渲染（user / link），返回拼进文本的字符串 */
+  _renderInlineSync(tag, args) {
+    if (tag === 'user') {
+      const name = args[0] || '';
+      const u = name ? getUserByUsername(name) : null;
+      if (u && u.feishuOpenId) return `<person id='${u.feishuOpenId}'>${u.displayName}</person>`;
+      return `**${u ? u.displayName : name}**`;
+    }
+    if (tag === 'link') {
+      const url = args[0] || '#';
+      const label = args[1] || url;
+      return `[${label}](${url})`;
+    }
+    return '';
+  }
+
+  /**
+   * 处理 block markup：异步 kick off 数据拉取 + enqueue 插入 + 开新段
+   * 关键：renderMarkup 立刻调用（数据 fetch 并行进行），insert 操作进队列等数据回来
+   */
+  _handleBlockMarkup(tag, args) {
+    // header markup 在 Stage B 不消费，直接跳过（Stage C 才会处理）
+    if (tag === 'header') return;
+
+    const counter = ++this._blockMarkupCounter;
+    const prevSegId = this._currentSegmentId;
+
+    // 立即 kick off 数据拉取（不进队列）
+    const renderPromise = renderMarkup(tag, args, counter);
+
+    // 生成新段的 element_id 并先在 _segments/_bodyElements 里占位
+    const newSegId = `main_text_${this._segments.length}`;
+
+    this._enqueue(`markup block ${tag}#${counter}`, async () => {
+      await this.ensureCardCreated();
+      if (!this.cardId) return;
+      const result = await renderPromise;
+      if (!result || result.placement !== 'block' || !result.elements) return;
+
+      // 先插 block 组件
+      await insertCardElements(this.cardId, result.elements, {
+        type: 'insert_after', targetElementId: prevSegId,
+      });
+      // 再插空的新段 markdown（text 流将往这里推）
+      await insertCardElements(this.cardId,
+        [{ tag: 'markdown', element_id: newSegId, content: '' }],
+        { type: 'insert_after', targetElementId: result.elementId }
+      );
+      console.log(`[Bot/Stream] block markup ${tag}#${counter} 已插入（新段 ${newSegId}）`);
+    });
+
+    // 同步更新内部状态：_bodyElements 加 block + new segment，切 _currentSegmentId
+    // 注意：此时卡片上 block 和 newSeg 还没创建，但后续 scheduleFlush(newSegId) 的 stream op 会
+    //      在 _opQueue 里排在 block insert 任务之后，等它完成才执行，顺序正确
+    const newSeg = { id: newSegId, text: '' };
+    this._segments.push(newSeg);
+    this._currentSegmentId = newSegId;
+
+    // 先 push 一个占位 element 到 bodyElements（真 element_id 将在 render 后补）
+    this._bodyElements.push({ _markupPlaceholder: true, tag, args, counter });
+    this._bodyElements.push({ tag: 'markdown', element_id: newSegId, content: '' });
+
+    // render 完成后把占位换成真 element，用于 onComplete 重建 body
+    renderPromise.then(result => {
+      if (!result || result.placement !== 'block' || !result.elements) return;
+      const idx = this._bodyElements.findIndex(
+        e => e._markupPlaceholder && e.tag === tag && e.counter === counter
+      );
+      if (idx >= 0) this._bodyElements.splice(idx, 1, ...result.elements);
+    }).catch(() => {});
   }
 
   async onToolStart(_toolSteps) {
@@ -321,9 +427,10 @@ class ChatCardStreamer {
   }
 
   async onToolDone(_toolSteps) {
-    // 下一轮文本接续：给累积文本加段落间隙（如果已有内容）
-    if (this.runningText && !this.runningText.endsWith('\n\n')) {
-      this.runningText += '\n\n';
+    // 下一轮文本接续：给当前段加段落间隙（如果已有内容且不以 \n\n 结尾）
+    const seg = this._segments.find(s => s.id === this._currentSegmentId);
+    if (seg && seg.text && !seg.text.endsWith('\n\n')) {
+      this._appendToCurrentSegment('\n\n');
     }
   }
 
@@ -340,18 +447,30 @@ class ChatCardStreamer {
       this.collapsePillWithSummary(this._currentPillRound);
       this._currentPillRound = null;
     }
-    // 先流式把最终文本推完（保留打字机效果）
-    this.flushElement('main_text_0', finalText);
-
-    // 等队列全部排完（insert/patch/stream 全部落地，含胶囊摘要兜底 patch；摘要填充是后续 patch，可能还在 pending，此时不阻塞 card.update）
+    // flush parser 尾 buffer（未闭合的 `[[` 当普通文本）
+    for (const part of this._markupStream.flush()) {
+      if (part.kind === 'text') this._appendToCurrentSegment(part.text);
+    }
+    // 每段都 flush 一次最终状态（throttle 可能还在待推）
+    for (const seg of this._segments) {
+      this.flushElement(seg.id, seg.text);
+    }
+    // 等队列全部排完
     await this._opQueue;
 
-    // card.update 整体切到完成态（header 变绿勾 + 完成 subtitle，body 保留 main_text_0 —— 胶囊会被整体替换掉，摘要填充 patch 若晚到会 no-op 因为 element 已不存在）
+    // card.update 整体切完成态。body 用重建好的 _bodyElements（含 markup 组件），
+    // 而不是 finalText 裸文本（裸文本含 [[markup]] 语法，会被当普通字符显示）
     const durationMs = Date.now() - this.startTime;
-    const finalCard = buildCompletionCard(this.scene, durationMs, finalText);
+    const bodyElements = this._finalBodyElements();
+    const finalCard = buildCompletionCard(this.scene, durationMs, bodyElements);
     await this._enqueue('final card.update', () => updateCardEntity(this.cardId, finalCard));
     await this._opQueue;
-    console.log(`[Bot/Stream] 已切到完成态 scene=${this.scene} duration=${(durationMs/1000).toFixed(1)}s`);
+    console.log(`[Bot/Stream] 已切到完成态 scene=${this.scene} duration=${(durationMs/1000).toFixed(1)}s segments=${this._segments.length}`);
+  }
+
+  /** 重建最终 body：过滤掉未 resolve 的 markup placeholder（fetch 失败的情况） */
+  _finalBodyElements() {
+    return this._bodyElements.filter(e => !e._markupPlaceholder);
   }
 
   async onDirectReply(finalText) {
@@ -365,11 +484,17 @@ class ChatCardStreamer {
       this.collapsePillWithSummary(this._currentPillRound);
       this._currentPillRound = null;
     }
-    this.flushElement('main_text_0', finalText);
+    for (const part of this._markupStream.flush()) {
+      if (part.kind === 'text') this._appendToCurrentSegment(part.text);
+    }
+    for (const seg of this._segments) {
+      this.flushElement(seg.id, seg.text);
+    }
     await this._opQueue;
 
     const durationMs = Date.now() - this.startTime;
-    const finalCard = buildCompletionCard(this.scene, durationMs, finalText);
+    const bodyElements = this._finalBodyElements();
+    const finalCard = buildCompletionCard(this.scene, durationMs, bodyElements);
     await this._enqueue('final card.update', () => updateCardEntity(this.cardId, finalCard));
     await this._opQueue;
   }

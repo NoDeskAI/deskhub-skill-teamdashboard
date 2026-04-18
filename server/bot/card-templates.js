@@ -219,18 +219,19 @@ export function buildPillCollapsePatch(summary, durationSec) {
 
 /**
  * 完成态整张卡（card.update 用）
- * body 只保留 main_text_0 + 最终文本
+ * @param {string} scene
+ * @param {number} durationMs
+ * @param {object[]|string} bodyOrText - body elements 数组（多段 + markup 组件），或者纯文本（兜底）
  */
-export function buildCompletionCard(scene, durationMs, finalText) {
+export function buildCompletionCard(scene, durationMs, bodyOrText) {
+  const elements = Array.isArray(bodyOrText)
+    ? bodyOrText
+    : [{ tag: 'markdown', element_id: 'main_text_0', content: String(bodyOrText || '') }];
   return {
     schema: '2.0',
     config: { streaming_mode: false, update_multi: true, width_mode: 'fill' },
     header: pickCompletionHeader(scene, durationMs),
-    body: {
-      elements: [
-        { tag: 'markdown', element_id: 'main_text_0', content: finalText },
-      ],
-    },
+    body: { elements },
   };
 }
 
