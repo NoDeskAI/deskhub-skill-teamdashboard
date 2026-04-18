@@ -156,6 +156,10 @@ class ChatCardStreamer {
     this._markupStream = new MarkupStream();
     this._blockMarkupCounter = 0;
 
+    // LLM 回答里任何位置 emit [[header:title|subtitle|template]] 会被捕获到这里
+    // onComplete/onDirectReply 的 card.update 用它覆盖预判的完成态 header
+    this._llmHeader = null;
+
     this.runningThinkingByRound = new Map();   // round → 该轮思考累积
     this._thinkingStartByRound = new Map();    // round → 首 thinking chunk 时间戳
 
@@ -549,8 +553,13 @@ class ChatCardStreamer {
    * 关键：renderMarkup 立刻调用（数据 fetch 并行进行），insert 操作进队列等数据回来
    */
   _handleBlockMarkup(tag, args) {
-    // header markup 在 Stage B 不消费，直接跳过（Stage C 才会处理）
-    if (tag === 'header') return;
+    // header markup 特殊：捕获参数但不插 body，onComplete 时用来 card.update 覆盖完成态 header
+    if (tag === 'header') {
+      const [title, subtitle, template] = args;
+      this._llmHeader = { title, subtitle, template };
+      console.log(`[Bot/Stream] LLM header 捕获: title="${title}" subtitle="${subtitle}" tpl="${template}"`);
+      return;
+    }
 
     const counter = ++this._blockMarkupCounter;
     const prevSegId = this._currentSegmentId;
@@ -671,9 +680,14 @@ class ChatCardStreamer {
     const durationMs = Date.now() - this.startTime;
     const bodyElements = this._finalBodyElements();
     const finalCard = buildCompletionCard(this.scene, durationMs, bodyElements);
+    // LLM 在回答里自己选了 header？用它覆盖预判的完成态 header
+    if (this._llmHeader) {
+      finalCard.header = buildLLMHeader(this._llmHeader);
+      console.log(`[Bot/Stream] 用 LLM 选的 header 覆盖完成态 title="${this._llmHeader.title}"`);
+    }
     await this._enqueue('final card.update', () => updateCardEntity(this.cardId, finalCard));
     await this._opQueue;
-    console.log(`[Bot/Stream] 已切到完成态 scene=${this.scene} duration=${(durationMs/1000).toFixed(1)}s segments=${this._segments.length}`);
+    console.log(`[Bot/Stream] 已切到完成态 scene=${this.scene} duration=${(durationMs/1000).toFixed(1)}s segments=${this._segments.length} llmHeader=${this._llmHeader ? 'yes' : 'no'}`);
   }
 
   /** 重建最终 body：过滤掉未 resolve 的 markup placeholder（fetch 失败的情况） */
@@ -707,6 +721,9 @@ class ChatCardStreamer {
     const durationMs = Date.now() - this.startTime;
     const bodyElements = this._finalBodyElements();
     const finalCard = buildCompletionCard(this.scene, durationMs, bodyElements);
+    if (this._llmHeader) {
+      finalCard.header = buildLLMHeader(this._llmHeader);
+    }
     await this._enqueue('final card.update', () => updateCardEntity(this.cardId, finalCard));
     await this._opQueue;
   }

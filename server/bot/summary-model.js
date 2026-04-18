@@ -34,6 +34,9 @@ export async function summarizeThinking(rawThinking) {
     const res = await client.messages.create({
       model: SUMMARY_MODEL,
       max_tokens: MAX_SUMMARY_TOKENS,
+      // 必须显式开启 thinking（即使不用）。不传的话 MiniMax 退化到 OpenAI 兼容模式
+      // 只返 reasoning_content 不返 text，我们就拿不到摘要。memory 里踩过这个坑。
+      thinking: { type: 'enabled', budget_tokens: 500 },
       messages: [
         {
           role: 'user',
@@ -44,16 +47,29 @@ export async function summarizeThinking(rawThinking) {
 
     const elapsed = Date.now() - t0;
     const blockTypes = Array.isArray(res.content) ? res.content.map(b => b.type).join(',') : 'none';
-    const text = res.content?.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+    const textBlocks = res.content?.filter(b => b.type === 'text') || [];
+    let text = textBlocks.map(b => b.text).join('').trim();
+
+    // 兜底：如果没有 text 块（MiniMax 有时只返 thinking），从 thinking 里抽末尾几十字
+    if (!text) {
+      const thinkingBlocks = res.content?.filter(b => b.type === 'thinking') || [];
+      const raw = thinkingBlocks.map(b => b.thinking || '').join('').trim();
+      // thinking 通常是推理过程，取最后一句（到 "所以" / "结论" / 句号后）
+      const lastSentence = raw.split(/[。！？\n]/).filter(Boolean).pop() || '';
+      text = lastSentence.trim();
+      if (text) {
+        console.log(`[Bot/Summary] text 块空，从 thinking 末段兜底抽："${text.slice(0, 30)}..."`);
+      }
+    }
 
     if (!text) {
-      console.warn(`[Bot/Summary] 响应 text 为空，${elapsed}ms blocks=[${blockTypes}]`);
+      console.warn(`[Bot/Summary] 响应 text 和 thinking 都为空，${elapsed}ms blocks=[${blockTypes}]`);
       return null;
     }
 
     const firstLine = text.split('\n')[0].trim();
     const final = firstLine.length > 24 ? firstLine.slice(0, 24) + '…' : firstLine;
-    console.log(`[Bot/Summary] 成功 ${elapsed}ms → "${final}"`);
+    console.log(`[Bot/Summary] 成功 ${elapsed}ms blocks=[${blockTypes}] → "${final}"`);
     return final;
   } catch (err) {
     const elapsed = Date.now() - t0;
