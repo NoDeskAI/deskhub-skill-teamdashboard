@@ -217,6 +217,52 @@ export function buildPillCollapsePatch(summary, durationSec) {
   };
 }
 
+/** 有效 header template 枚举（飞书官方文档确认） */
+export const HEADER_TEMPLATES_VALID = [
+  'default', 'blue', 'wathet', 'turquoise', 'green', 'yellow',
+  'orange', 'red', 'carmine', 'violet', 'purple', 'indigo', 'grey',
+];
+
+/**
+ * 根据 LLM 给的 {title, subtitle, template} 构造 header 对象（Stage C 用）
+ * icon/color 从 template 派生，LLM 不选
+ */
+export function buildLLMHeader({ title, subtitle, template } = {}) {
+  const tpl = HEADER_TEMPLATES_VALID.includes(template) ? template : 'default';
+  const icon = tpl === 'red' ? 'close_outlined' : 'chat_outlined';
+  const iconColor = (tpl === 'default' || tpl === 'grey') ? 'orange' : tpl;
+  const header = {
+    title: { tag: 'plain_text', content: title || BOT_NAME },
+    icon: { tag: 'standard_icon', token: icon, color: iconColor },
+    template: tpl,
+  };
+  if (subtitle) header.subtitle = { tag: 'plain_text', content: subtitle };
+  return header;
+}
+
+/**
+ * LLM header 模式下的 initial card（Stage C 用）
+ * @param {object} headerObj - buildLLMHeader 返回值
+ */
+export function buildChatCardInitialFromHeader(headerObj) {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: true,
+      streaming_config: STREAMING_CONFIG,
+      summary: { content: '正在回答...' },
+      update_multi: true,
+      width_mode: 'fill',
+    },
+    header: headerObj,
+    body: {
+      elements: [
+        { tag: 'markdown', element_id: 'main_text_0', content: '' },
+      ],
+    },
+  };
+}
+
 /**
  * 完成态整张卡（card.update 用）
  * @param {string} scene

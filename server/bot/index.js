@@ -36,6 +36,8 @@ import { enqueueMessage } from './concurrency.js';
 import { getUserByOpenId, bindFeishuUser } from '../mcp/db-ops.js';
 import {
   buildChatCardInitial,
+  buildChatCardInitialFromHeader,
+  buildLLMHeader,
   buildThinkingPill,
   buildPillCollapsePatch,
   buildCompletionCard,
@@ -119,13 +121,30 @@ class ChatCardStreamer {
    * @param {string} [opts.presetCardId]
    * @param {string} [opts.presetMessageId]
    */
-  constructor(receiveId, receiveIdType, { scene = 'default', presetCardId = null, presetMessageId = null } = {}) {
+  constructor(receiveId, receiveIdType, { scene = 'default', presetCardId = null, presetMessageId = null, llmHeaderMode = false } = {}) {
     this.receiveId = receiveId;
     this.receiveIdType = receiveIdType;
     this.scene = scene;
     this.startTime = Date.now();
     this.cardId = presetCardId;
     this.messageId = presetMessageId;
+
+    // ── LLM header 控制（Stage C） ──
+    // llmHeaderMode=true：不预创建卡片，buffer 所有 chunks，等 LLM 在首个 text chunk 里
+    // 输出 [[header:title|subtitle|template]] 指令后才 createCard。2s 兜底用 default header。
+    this._llmHeaderMode = llmHeaderMode;
+    this._headerResolved = !llmHeaderMode;   // preset 模式一开始就 resolved
+    this._pendingEvents = [];
+    this._bufferedText = '';
+    this._headerTimer = null;
+    if (llmHeaderMode) {
+      this._headerTimer = setTimeout(() => {
+        if (!this._headerResolved) {
+          console.log('[Bot/Stream] header 2s timeout，fallback 到 default');
+          this._resolveHeader(null);
+        }
+      }, 2000);
+    }
 
     // ── 多段 main_text 状态 ──
     // _segments 和 _bodyElements 同步维护：每段对应一个 markdown element
@@ -172,9 +191,14 @@ class ChatCardStreamer {
 
   /**
    * card 创建：不进队列（队列内任务会 await 它，进队列死锁）
+   * llmHeaderMode 下，由 _resolveHeader 调用 _createCardWithHeader，此处直接返 _cardPromise
    */
   ensureCardCreated() {
     if (this._cardPromise) return this._cardPromise;
+    if (this._llmHeaderMode) {
+      // 未 resolve 时不应被调到（event handlers 会 guard），兜底返 reject 以防万一
+      return Promise.reject(new Error('ensureCardCreated called before header resolved'));
+    }
     this._cardPromise = (async () => {
       const cid = await createCardEntity(buildChatCardInitial(this.scene));
       if (!cid) throw new Error('createCardEntity 返回 null');
@@ -186,6 +210,86 @@ class ChatCardStreamer {
       throw err;
     });
     return this._cardPromise;
+  }
+
+  /** 扫一段文本里首个完整的 [[header:title|subtitle|template]] markup */
+  _scanHeaderMarkup(text) {
+    const m = text.match(/\[\[header:([^\]]+)\]\]/);
+    if (!m) return null;
+    const args = m[1].split('|').map(s => s.trim());
+    return {
+      title: args[0] || '小合',
+      subtitle: args[1] || '',
+      template: args[2] || 'default',
+      consumed: m[0],
+    };
+  }
+
+  /** 用 LLM 给的 header 建卡，或没 markup 时走 default */
+  _createCardWithHeader(headerObj) {
+    return (async () => {
+      const cid = await createCardEntity(buildChatCardInitialFromHeader(headerObj));
+      if (!cid) throw new Error('createCardEntity 返回 null');
+      this.cardId = cid;
+      this.messageId = await sendCardById(this.receiveId, this.receiveIdType, cid);
+      console.log(`[Bot/Stream] 卡片已创建（LLM header） cardId=${cid} title=${headerObj.title.content} tpl=${headerObj.template}`);
+    })();
+  }
+
+  /**
+   * 解析 buffer 里的 header markup（或用 default），createCard，replay 所有缓冲事件
+   * 只能调一次（_headerResolved 保护）
+   */
+  _resolveHeader(bufferedText) {
+    if (this._headerResolved) return;
+    this._headerResolved = true;
+    if (this._headerTimer) { clearTimeout(this._headerTimer); this._headerTimer = null; }
+
+    const parsed = bufferedText ? this._scanHeaderMarkup(bufferedText) : null;
+    const headerObj = parsed
+      ? buildLLMHeader(parsed)
+      : buildLLMHeader({ title: '小合', subtitle: '我在', template: 'default' });
+
+    this._cardPromise = this._createCardWithHeader(headerObj).catch(err => {
+      this._cardPromise = null;
+      throw err;
+    });
+
+    // ── Replay buffered events ──
+    const pending = this._pendingEvents;
+    this._pendingEvents = [];
+    const bufText = this._bufferedText;
+    this._bufferedText = '';
+
+    // 把 header markup 从文本里去掉，其余照常喂 onTextChunk（会经过 markup parser）
+    const strippedText = parsed
+      ? bufText.replace(parsed.consumed, '').replace(/^\s*\n+/, '')
+      : bufText;
+
+    // 按事件类型分组 squash（假设 pending 事件都是 round 0，order: thinking* → text* → tool_start*）
+    const thinkingByRound = new Map();
+    const toolEvents = [];
+    for (const evt of pending) {
+      if (evt.type === 'thinking') {
+        const cur = thinkingByRound.get(evt.round || 0) || '';
+        thinkingByRound.set(evt.round || 0, cur + evt.delta);
+      } else if (evt.type === 'tool_start') {
+        toolEvents.push(evt);
+      }
+      // text 事件通过 strippedText 一次性回放
+    }
+    // 先 thinking
+    for (const [round, text] of thinkingByRound) {
+      if (text) this.onThinkingChunk(text, round);
+    }
+    // 再 tool_start（少见）
+    for (const evt of toolEvents) {
+      this.onToolStart(evt.toolSteps);
+    }
+    // 最后 text
+    if (strippedText) {
+      this.onTextChunk(strippedText, 0);
+    }
   }
 
   /**
@@ -292,6 +396,11 @@ class ChatCardStreamer {
   // ── 事件处理 ──
 
   onThinkingChunk(delta, round = 0) {
+    // Stage C：header 未 resolve 时先 buffer
+    if (!this._headerResolved) {
+      this._pendingEvents.push({ type: 'thinking', delta, round });
+      return;
+    }
     // 记录该轮起始时间（首 chunk）
     if (!this._thinkingStartByRound.has(round)) {
       this._thinkingStartByRound.set(round, Date.now());
@@ -314,6 +423,16 @@ class ChatCardStreamer {
   }
 
   onTextChunk(delta, round = 0) {
+    // Stage C：header 未 resolve 时 buffer 并尝试解析
+    if (!this._headerResolved) {
+      this._bufferedText += delta;
+      this._pendingEvents.push({ type: 'text', delta, round });
+      // 一旦 buffer 里出现 `]]` 说明至少一个 markup 闭合，或 100 字后兜底
+      if (this._bufferedText.includes(']]') || this._bufferedText.length >= 100) {
+        this._resolveHeader(this._bufferedText);
+      }
+      return;
+    }
     this.ensureCardCreated().catch(() => {});
 
     // 首个 text chunk 到来，收起当前胶囊（异步填摘要）
@@ -421,7 +540,12 @@ class ChatCardStreamer {
     }).catch(() => {});
   }
 
-  async onToolStart(_toolSteps) {
+  async onToolStart(toolSteps) {
+    // Stage C：tool_use 先于任何 text 说明 LLM 跳过了 header markup（违规），用 default 兜底
+    if (this._llmHeaderMode && !this._headerResolved) {
+      console.log('[Bot/Stream] tool_start 前未见 header markup，fallback default');
+      this._resolveHeader(null);
+    }
     // 工具调用淡化：不插任何 UI，只确保卡片已创建
     this.ensureCardCreated().catch(() => {});
   }
@@ -436,6 +560,11 @@ class ChatCardStreamer {
 
   async onComplete(finalText) {
     this.cancelAllPending();
+    // Stage C：若 complete 时 header 仍未 resolve（极罕见：整个流无 text 无 tool），用 finalText 兜底扫一遍
+    if (this._llmHeaderMode && !this._headerResolved) {
+      this._resolveHeader(finalText || null);
+      if (this._cardPromise) await this._cardPromise.catch(() => {});
+    }
     if (!this.cardId) {
       // 整个流式过程没产生任何 chunks，降级一次性发
       await createAndSendCard(this.receiveId, this.receiveIdType,
@@ -475,6 +604,10 @@ class ChatCardStreamer {
 
   async onDirectReply(finalText) {
     this.cancelAllPending();
+    if (this._llmHeaderMode && !this._headerResolved) {
+      this._resolveHeader(finalText || null);
+      if (this._cardPromise) await this._cardPromise.catch(() => {});
+    }
     if (!this.cardId) {
       await createAndSendCard(this.receiveId, this.receiveIdType,
         buildSimpleCard(finalText, { level: 'info' }));
@@ -501,14 +634,19 @@ class ChatCardStreamer {
 
   async onError(text) {
     this.cancelAllPending();
+    // Stage C：若 header 未 resolve，直接发一次性错误卡（不用 LLM header）
+    if (this._llmHeaderMode && this._headerTimer) {
+      clearTimeout(this._headerTimer);
+      this._headerTimer = null;
+    }
     if (!this.cardId) {
       await createAndSendCard(this.receiveId, this.receiveIdType,
         buildSimpleCard(text, { level: 'error' }));
       return;
     }
-    // 清理胶囊 + 切错误态整卡
+    // 收起残留胶囊 + 切错误态整卡
     if (this._currentPillRound !== null) {
-      this.deleteThinkingPill(this._currentPillRound);
+      this.collapsePillWithSummary(this._currentPillRound);
       this._currentPillRound = null;
     }
     await this._opQueue;
@@ -578,28 +716,36 @@ async function handleMessage(text, chatId, userId, chatType) {
   const { status } = await enqueueMessage(userId, async () => {
     const boundUser = getUserByOpenId(userId);
 
-    // ── 场景预判 + TTFP 预创建 ──
-    const scene = detectScene(text);
-    console.log(`[Bot/Stream] scene=${scene} text=${text.slice(0, 40)}`);
+    // ── Header 模式分支（Stage C）──
+    // BOT_HEADER_MODE=llm（默认）：Stage C，LLM 用 [[header:...]] markup 自选，TTFP 延后 2s 兜底
+    // BOT_HEADER_MODE=preset     ：回退 Stage A/B 路径，关键词预判场景 + 预创建卡片保 TTFP
+    const headerMode = (process.env.BOT_HEADER_MODE || 'llm').toLowerCase();
+    let streamer;
 
-    let presetCardId = null;
-    let presetMessageId = null;
-    try {
-      const { cardId, messageId } = await createAndSendCard(
-        receiveId, receiveIdType, buildChatCardInitial(scene)
-      );
-      presetCardId = cardId;
-      presetMessageId = messageId;
-      if (cardId) console.log(`[Bot/Stream] 卡片预创建 cardId=${cardId} scene=${scene}`);
-    } catch (err) {
-      console.warn('[Bot] 卡片预创建失败，降级到首个 chunk 触发:', err.message);
+    if (headerMode === 'preset') {
+      // Stage A/B 路径
+      const scene = detectScene(text);
+      console.log(`[Bot/Stream] preset mode scene=${scene} text=${text.slice(0, 40)}`);
+      let presetCardId = null;
+      let presetMessageId = null;
+      try {
+        const { cardId, messageId } = await createAndSendCard(
+          receiveId, receiveIdType, buildChatCardInitial(scene)
+        );
+        presetCardId = cardId;
+        presetMessageId = messageId;
+        if (cardId) console.log(`[Bot/Stream] 卡片预创建 cardId=${cardId}`);
+      } catch (err) {
+        console.warn('[Bot] 卡片预创建失败，降级到首个 chunk 触发:', err.message);
+      }
+      streamer = new ChatCardStreamer(receiveId, receiveIdType, {
+        scene, presetCardId, presetMessageId,
+      });
+    } else {
+      // Stage C 路径
+      console.log(`[Bot/Stream] llm header mode text=${text.slice(0, 40)}`);
+      streamer = new ChatCardStreamer(receiveId, receiveIdType, { llmHeaderMode: true });
     }
-
-    const streamer = new ChatCardStreamer(receiveId, receiveIdType, {
-      scene,
-      presetCardId,
-      presetMessageId,
-    });
 
     const onProgress = async (event) => {
       try {
