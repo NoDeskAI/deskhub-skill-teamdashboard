@@ -418,6 +418,8 @@ export function listPlans({ type, status } = {}) {
     (scoreMap[s.variant_id] ??= []).push({
       id: s.id, tester: s.tester, dimId: s.dim_id, value: s.value,
       comment: s.comment, date: fmtDate(s.created_at), evalDoc: s.eval_doc,
+      authorType: s.author_type || 'human',
+      proxyAuthorId: s.proxy_author_id || null,
     });
   }
 
@@ -429,6 +431,8 @@ export function listPlans({ type, status } = {}) {
       link: v.link, content: v.content,
       attachments: parseJSON(v.attachments),
       scores: scoreMap[v.id] || [],
+      authorType: v.author_type || 'human',
+      proxyAuthorId: v.proxy_author_id || null,
     });
   }
 

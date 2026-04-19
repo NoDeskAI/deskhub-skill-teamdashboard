@@ -90,15 +90,28 @@ async function renderPlan(id, counter) {
     }
   }
 
-  // 方案数 / 均分
+  // 方案数 / 均分 / AI 代笔计数
   const variants = Array.isArray(plan.variants) ? plan.variants : [];
   const allScores = variants.flatMap(v => Array.isArray(v.scores) ? v.scores : []);
   const avgScore = allScores.length
     ? (allScores.reduce((s, x) => s + (x.value || 0), 0) / allScores.length).toFixed(1)
     : null;
+  const aiVariantCount = variants.filter(v => v.authorType === 'ai').length;
+  const aiScoreCount = allScores.filter(s => s.authorType === 'ai').length;
+
   const metaParts = [];
-  if (variants.length) metaParts.push(`方案 ${variants.length} 个`);
-  if (avgScore !== null) metaParts.push(`均分 ${avgScore}`);
+  if (variants.length) {
+    const vStr = aiVariantCount > 0
+      ? `方案 ${variants.length} 个（含 🦀 ${aiVariantCount} 个 AI 代笔）`
+      : `方案 ${variants.length} 个`;
+    metaParts.push(vStr);
+  }
+  if (avgScore !== null) {
+    const sStr = aiScoreCount > 0
+      ? `均分 ${avgScore}（${aiScoreCount} 条 🦀 AI 代测）`
+      : `均分 ${avgScore}`;
+    metaParts.push(sStr);
+  }
   if (plan.owner) metaParts.push(`负责人 ${plan.owner}`);
   const metaLine = metaParts.length ? `<font color='grey'>${metaParts.join(' · ')}</font>` : '';
 

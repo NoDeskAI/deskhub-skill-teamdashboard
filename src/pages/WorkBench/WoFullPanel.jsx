@@ -24,16 +24,29 @@ export default function WoFullPanel({ wo, dims, show, originRect, onClose, role,
   const accordionItems = wo.variants.map(v => {
     const avg = avgScore(v, activeDims);
     const isAI = v.authorType === 'ai';
+    const aiProxy = v.proxyAuthorId || v.uploader;
 
     return {
       key: v.id,
       header: (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%",
+          // AI 态：header 整条加左侧橙条 + 淡橙底（通过负 margin 延伸覆盖整个 Accordion item 行）
+          ...(isAI ? {
+            background: "rgba(184,92,26,0.10)",
+            borderLeft: "4px solid #b85c1a",
+            padding: `${GAP.sm}px ${GAP.md}px`,
+            margin: `-${GAP.base}px -${GAP.lg}px -${GAP.base}px -${GAP.lg}px`,
+            borderRadius: 4,
+          } : undefined),
+        }}>
           <div>
-            <span style={{ fontFamily: FONT_SANS, fontSize: FONT_SIZE.lg, color: COLOR.text }}>{v.name}</span>
-            {isAI && <AIBadge title={`小合代 ${v.proxyAuthorId || v.uploader} 代笔`} />}
+            <span style={{ fontFamily: FONT_SANS, fontSize: FONT_SIZE.lg, color: isAI ? "#b85c1a" : COLOR.text, fontWeight: isAI ? 600 : 400 }}>
+              {v.name}
+            </span>
+            {isAI && <AIBadge title={`小合代 ${aiProxy} 代笔 · 你可以随时删改`} />}
             <span style={{ fontFamily: FONT_SANS, fontSize: FONT_SIZE.sm, color: COLOR.sub, marginLeft: GAP.md }}>
-              {v.uploader} · {v.uploaded}
+              {isAI ? `🦀 代 ${aiProxy}` : v.uploader} · {v.uploaded}
             </span>
           </div>
           <span style={{ fontFamily: FONT_MONO, fontSize: FONT_SIZE.base, color: avg > 0 ? COLOR.text : COLOR.dim }}>
@@ -43,12 +56,31 @@ export default function WoFullPanel({ wo, dims, show, originRect, onClose, role,
       ),
       content: (
         <div style={isAI ? {
-          background: 'rgba(184,92,26,0.05)',
-          borderLeft: '3px solid #b85c1a',
-          borderRadius: '0 6px 6px 0',
-          padding: `${GAP.base}px ${GAP.lg}px`,
+          background: 'rgba(184,92,26,0.08)',
+          borderLeft: '4px solid #b85c1a',
+          borderRadius: '0 8px 8px 0',
+          padding: `${GAP.lg}px ${GAP.lg}px`,
           margin: `0 0 0 -${GAP.lg}px`,
         } : undefined}>
+          {/* AI 代笔横幅 */}
+          {isAI && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: GAP.sm,
+              padding: `${GAP.sm}px ${GAP.md}px`,
+              marginBottom: GAP.base,
+              background: "rgba(184,92,26,0.15)",
+              border: "1px solid rgba(184,92,26,0.35)",
+              borderRadius: 6,
+              fontFamily: FONT_SANS, fontSize: FONT_SIZE.md,
+              color: "#7a3d10",
+            }}>
+              <span style={{ fontSize: 16 }}>🦀</span>
+              <span>
+                <strong>小合代「{aiProxy}」代笔的方案</strong>
+                <span style={{ color: "#9a5a2a", marginLeft: 6 }}>· 你可以随时删除或修改</span>
+              </span>
+            </div>
+          )}
           {/* 方案说明 */}
           {v.desc && (
             <div style={{ fontFamily: FONT_SANS, fontSize: FONT_SIZE.base, color: COLOR.text2, lineHeight: 1.6, marginBottom: GAP.lg }}>
@@ -422,26 +454,27 @@ function parseEvalDocs(raw) {
   return [];
 }
 
-/** 小合代笔徽章 — 橙棕风格 + 小螃蟹 */
+/** 小合代笔徽章 — 橙棕风格 + 小螃蟹。tiny 版用于行内（评分行），default 更醒目 */
 function AIBadge({ tiny = false, title = "小合代笔" }) {
   return (
     <span
       title={title}
       style={{
-        display: "inline-flex", alignItems: "center", gap: 2,
+        display: "inline-flex", alignItems: "center", gap: 3,
         marginLeft: tiny ? 4 : 8,
-        padding: tiny ? "0 4px" : "1px 6px",
-        fontSize: tiny ? 10 : 11,
-        fontFamily: FONT_MONO,
-        color: "#b85c1a",
-        background: "rgba(184,92,26,0.12)",
-        border: "1px solid rgba(184,92,26,0.3)",
-        borderRadius: 3,
+        padding: tiny ? "0 5px" : "2px 8px",
+        fontSize: tiny ? 10 : 12,
+        fontFamily: FONT_MONO, fontWeight: 600,
+        color: "#ffffff",
+        background: "#b85c1a",
+        border: "1px solid #9a4a12",
+        borderRadius: tiny ? 3 : 4,
         lineHeight: 1.4,
         userSelect: "none",
+        letterSpacing: 0.3,
       }}
     >
-      🦀 AI
+      🦀 {tiny ? "AI" : "AI 代笔"}
     </span>
   );
 }

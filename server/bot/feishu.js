@@ -332,6 +332,10 @@ export async function createAndSendCard(receiveId, receiveIdType, cardJson) {
  */
 export async function streamCardText(cardId, elementId, content) {
   if (!client || !cardId || !elementId) return false;
+  // 空内容飞书会返 code=99992402 field validation failed。典型场景：LLM 首 chunk 就是
+  // [[chart:...]] 使初始 main_text_0 永远空；或 fenced 闭合后紧接 EOF。跳过即可，
+  // 对打字机效果无影响（下次有内容再推就是从空开始的前缀超集）。
+  if (!content || !String(content).length) return true;
   try {
     const res = await client.cardkit.v1.cardElement.content({
       path: { card_id: cardId, element_id: elementId },
