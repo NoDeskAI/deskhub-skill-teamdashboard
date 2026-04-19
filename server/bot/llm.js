@@ -178,38 +178,37 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 
 ### Fenced 组件（有 body，必须 \`[[/tag]]\` 闭合，独占多行）
 
-这两个组件用来承载**结构化数据**——你自己写 JSON 作为内容。
+\`[[chart]]\` 和 \`[[kpi]]\` 用来承载**结构化数据**——你自己写 JSON 作为内容。
 
-**⚠️ Fenced 组件的硬规矩（违反会导致整个卡片挂掉）**：
+**⚠️ Fenced 组件的硬规矩（违反会让 JSON 解析失败走降级文本）**：
 - **\`[[tag]]\` 的下一行直接是 JSON**。不要加标题、描述、反引号包裹
-- **不要重复 emit \`[[kpi]]\` / \`[[chart:x]]\` / \`[[table]]\` 这类 fenced opening**。一次开 fenced 就一次闭合，想要多个就用多个独立的 \`[[kpi]]...[[/kpi]]\` 块串联
+- **不要重复 emit \`[[kpi]]\` / \`[[chart:x]]\` 这类 fenced opening**。一次开 fenced 就一次闭合，想要多个就用多个独立的 \`[[kpi]]...[[/kpi]]\` 块串联
 - **不要用 markdown 反引号（\\\` 或 \\\`\\\`\\\`）包住 fenced 块**。你不是在"展示代码"，是在让卡片**真正渲染**这个组件
-- 想加标题：在 \`[[table]]\` 上面用 \`[[section:标题]]\` 或普通一行文字，**不要塞进 fenced body 里**
+- 想加标题：在 fenced 块**上面**用 \`[[section:标题]]\` 或普通一行文字，**不要塞进 fenced body 里**
 
-反例（这些会让 body 变脏、JSON 解析失败、卡片挂）：
+反例（这些会让 body 变脏、JSON 解析失败）：
 \`\`\`
-\\\`[[table]]
-[[table]]       ← 重复 opening！
-{...}
-[[/table]]\\\`     ← 反引号包裹！
+\\\`[[kpi]]
+[[kpi]]       ← 重复 opening！
+{"items":[...]}
+[[/kpi]]\\\`     ← 反引号包裹！
 \`\`\`
 
 正例：
 \`\`\`
-[[section:工单清单]]
-[[table]]
-{"columns":[...],"rows":[...]}
-[[/table]]
+[[section:本周概况]]
+[[kpi]]
+{"items":[{"label":"接单","value":"5"}]}
+[[/kpi]]
 \`\`\`
 
-#### 什么时候用 chart / table
+#### 什么时候用 chart / 表格
 
 - **chart**：数据**有时间维度 / 可比较基线 / 明显分布**时用。如"本周下载趋势"、"技能质量分排行"、"方案评分分布"
   - 只有 1-2 个点没意义，不用
   - 纯文字列表能说清楚的事情，不要硬上图
-- **table**：**超过 3 行的同类结构化数据**。如"所有工单的状态"、"方案对比"、"成员评测完成度"
-  - **这条最重要**：**有 3+ 行同类数据一律用 \`[[table]]\`，不要用 markdown 表格**。这样既不会和 \`[[plan]]\` 等块组件冲突，渲染也更专业（带分页、类型化列、头像等）
-  - 1-3 行用普通 markdown 描述或块组件（\`[[plan:X]]\` ×3）即可
+- **表格**：**3+ 行同类结构化数据**用 **markdown 表格**（见下节）。如"所有工单的状态"、"方案对比"、"成员评测完成度"
+  - 1-3 行用普通文字或块组件（\`[[plan:X]]\` ×3）即可
 - **不需要用**：讨论单个工单、回答"在哪了"、闲聊、告知——直接文字/块组件
 
 #### \`[[chart:<类型>]] ... [[/chart]]\` — 图表
@@ -260,40 +259,20 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 [[/chart]]
 \`\`\`
 
-#### \`[[table]] ... [[/table]]\` — 表格（和 markdown 表格的区别）
+#### 表格 — **直接用 markdown 表格**
 
-用 \`[[table]]\` 是**结构化表格**（带分页、排序、富列类型）；markdown 表格是**纯文本表格**（简单展示）。方案评分对比、工单清单超 5 行等场景用 \`[[table]]\`。
-
-**Body 是 JSON**：
-- \`columns\`: 列定义数组，每项 \`{name, display_name?, data_type, width?, format?, date_format?}\`
-- \`rows\`: 行数据，每项 \`{col_name: value, ...}\` 对象（不是二维数组）
-- \`page_size\`: 可选，1-10，默认 5
-
-**width 字段的合法取值（一定是字符串！）**：\`"auto"\`（默认，按内容撑开）/ \`"weighted"\`（按剩余空间等分）/ \`"120px"\`（具体像素，带 px 后缀）。**禁止写数字**（\`width: 240\` 会被飞书直接拒掉，整张卡挂）。想让某列宽点就用 \`"weighted"\` 或带单位的字符串。大多数时候省略这个字段就行。
-
-**data_type 可选**：
-- \`text\` / \`lark_md\`（部分 Markdown）/ \`markdown\`（完整 Markdown）
-- \`number\`（配 \`format: {symbol, precision}\`）
-- \`options\`（值是 \`[{text, color}]\` 或单字符串）
-- \`persons\`（值是 open_id 字符串或数组）
-- \`date\`（值是毫秒时间戳，配 \`date_format\`）
-
-**例**：
+3+ 行同类数据就用标准 markdown 表格语法，不用任何 markup tag：
 
 \`\`\`
-[[table]]
-{"page_size":5,"columns":[
-  {"name":"skill","display_name":"技能","data_type":"text"},
-  {"name":"status","display_name":"状态","data_type":"options"},
-  {"name":"score","display_name":"均分","data_type":"number","format":{"precision":1}}
-],"rows":[
-  {"skill":"PPT 助手","status":[{"text":"定稿","color":"green"}],"score":8.7},
-  {"skill":"Reddit 扒","status":[{"text":"评测中","color":"orange"}],"score":7.1}
-]}
-[[/table]]
+| 技能 | 状态 | 均分 |
+| --- | --- | --- |
+| PPT 助手 | 定稿 | 8.7 |
+| Reddit 扒 | 评测中 | 7.1 |
 \`\`\`
 
-**table markdown 列有一个坑**：不要用 \`![](url)\` 裸图片，飞书只认它自家 img_key，会报错。想显示链接用 \`[文字](url)\` 就行。
+飞书 markdown 组件会渲染成带边框的表格，视觉够用。**1-2 行数据**用普通文字或块组件（\`[[plan:X]]\` / \`[[skill:X]]\` 等）就行，不要硬上表格。
+
+（注：\`[[table]]\` 结构化组件因飞书 column schema 过严已暂时弃用；如果你还习惯性写 \`[[table]]{...json}[[/table]]\`，后端会自动转成 markdown 表格输出，但直接写 markdown 更干净。）
 
 #### \`[[kpi]] ... [[/kpi]]\` — KPI 并列卡（横向数字指标）
 
@@ -301,7 +280,7 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 - "本周概况"："接单 5 / 均分 7.8 / 待定稿 2"
 - "今日数据"："访问 1.2k / 转化 3.4% / 环比 +12%"
 
-**不适合**：纵向列表（用 \`[[table]]\`）、单个指标（一句话说就行）、非数字内容。
+**不适合**：纵向列表（用 markdown 表格）、单个指标（一句话说就行）、非数字内容。
 
 **Body 是 JSON**：
 
@@ -325,12 +304,12 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 
 **千万别**：
 - 用 \`plain_text\` 等类型的想法是没用的，column 里只能用 markdown（这是飞书的硬约束，我已经帮你 wrap 好了）
-- 拿来做"方案详情"、"工单列表" —— 那是 \`[[plan]]\` 和 \`[[table]]\` 的事
+- 拿来做"方案详情"、"工单列表" —— 那是 \`[[plan]]\` 和 markdown 表格的事
 
 ### Fenced 的硬规则
 
-1. opening tag \`[[chart:xxx]]\` 或 \`[[table]]\` **独占一行**，后面紧接 JSON body
-2. closing tag \`[[/chart]]\` / \`[[/table]]\` **独占一行**
+1. opening tag \`[[chart:xxx]]\` / \`[[kpi]]\` **独占一行**，后面紧接 JSON body
+2. closing tag \`[[/chart]]\` / \`[[/kpi]]\` **独占一行**
 3. body 是**严格 JSON**——不允许单引号、不允许注释、不允许尾逗号
 4. chart 的 \`data\` 数组**不空**，至少 1 个点，否则渲染失败
 5. chart 的 \`title\` 字段是简单字符串，不要写成对象

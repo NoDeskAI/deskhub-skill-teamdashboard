@@ -120,11 +120,11 @@ async function renderLink(url, label) {
 
 async function renderPlan(id, counter) {
   if (!id) {
-    return blockFallback('block_plan', counter, `（plan markup 缺 ID）`);
+    return blockFallback('plan', counter, `（plan markup 缺 ID）`);
   }
   const plan = getPlanDetail(id);
   if (!plan) {
-    return blockFallback('block_plan', counter, `（工单 ${id} 不存在）`);
+    return blockFallback('plan', counter, `（工单 ${id} 不存在）`);
   }
 
   // 状态 tag（PLAN_ST.l + 枚举色）
@@ -201,14 +201,14 @@ async function renderPlan(id, counter) {
 }
 
 async function renderSkill(slug, counter) {
-  if (!slug) return blockFallback('block_skill', counter, '（skill markup 缺 slug）');
+  if (!slug) return blockFallback('skill', counter, '（skill markup 缺 slug）');
   let skill = null;
   try {
     skill = await getDeskhubSkill(slug);
   } catch (err) {
     console.warn('[Bot/Markup] getDeskhubSkill 失败:', err.message);
   }
-  if (!skill) return blockFallback('block_skill', counter, `（技能 ${slug} 未找到）`);
+  if (!skill) return blockFallback('skill', counter, `（技能 ${slug} 未找到）`);
 
   const name = skill.displayName || skill.name || slug;
   const summary = skill.summary || skill.description || '';
@@ -234,14 +234,14 @@ async function renderSkill(slug, counter) {
 }
 
 async function renderMcp(name, counter) {
-  if (!name) return blockFallback('block_mcp', counter, '（mcp markup 缺 name）');
+  if (!name) return blockFallback('mcp', counter, '（mcp markup 缺 name）');
   let tool = null;
   try {
     tool = await getMcpToolByName(name);
   } catch (err) {
     console.warn('[Bot/Markup] getMcpToolByName 失败:', err.message);
   }
-  if (!tool) return blockFallback('block_mcp', counter, `（MCP 工具 ${name} 未找到）`);
+  if (!tool) return blockFallback('mcp', counter, `（MCP 工具 ${name} 未找到）`);
 
   const elementId = blockId('mcp', counter);
   return {
@@ -451,63 +451,41 @@ async function renderKpi(body, counter) {
   };
 }
 
-// 飞书 table column.data_type 的 7 个合法值（见记忆 markup-system.md），
-// LLM 常产的别名统一映射过来。不认识的最终退 'text'，保证不会触发 column idx:N 错。
-const DATA_TYPE_ALIASES = {
-  text: 'text', string: 'text', str: 'text', bool: 'text', boolean: 'text',
-  lark_md: 'lark_md', larkmd: 'lark_md',
-  markdown: 'markdown', md: 'markdown', longtext: 'markdown', long_text: 'markdown', richtext: 'markdown',
-  number: 'number', int: 'number', integer: 'number', float: 'number', double: 'number', decimal: 'number', percent: 'number',
-  options: 'options', option: 'options', choice: 'options', choices: 'options', select: 'options', tag: 'options', tags: 'options', enum: 'options',
-  persons: 'persons', person: 'persons', user: 'persons', users: 'persons', member: 'persons', members: 'persons',
-  date: 'date', datetime: 'date', time: 'date', timestamp: 'date',
-};
-const VALID_ALIGN = new Set(['left', 'center', 'right']);
-
 /**
- * 严规整 LLM 产的 table column：
- *   - 缺 name 直接废（飞书 column idx:N 错的常见原因）
- *   - data_type 走别名映射到白名单，未知退 'text'
- *   - width 数字转 '{n}px'，非字符串非数字丢
- *   - horizontal_align 只认 left/center/right
- *   - format 只在 number 列保留 {symbol, precision, separator} 子集
- *   - date_format 只在 date 列保留字符串
- *   - 其他未知字段一律丢（飞书严校验，任何多余字段都可能触发 column idx:N 错）
+ * 把 cell 值渲染成 markdown 表格单元里的字符串。
+ * 飞书 markdown 支持常见值：纯文本 / 数字 / 链接。复杂对象降级为字符串。
  */
-function normalizeColumn(col) {
-  if (!col || typeof col !== 'object' || !col.name) return null;
-  const out = { name: String(col.name) };
-
-  if (col.display_name != null) out.display_name = String(col.display_name);
-
-  const rawDt = typeof col.data_type === 'string' ? col.data_type.toLowerCase().trim() : '';
-  out.data_type = DATA_TYPE_ALIASES[rawDt] || 'text';
-
-  if (col.width !== undefined && col.width !== null) {
-    if (typeof col.width === 'string' && col.width) out.width = col.width;
-    else if (typeof col.width === 'number' && Number.isFinite(col.width)) out.width = `${col.width}px`;
+function cellToMd(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (typeof v === 'string') return v.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  if (Array.isArray(v)) {
+    // options 列典型：[{text, color}] 或 ['a', 'b']
+    return v.map(item => {
+      if (item && typeof item === 'object' && 'text' in item) return String(item.text);
+      return typeof item === 'string' ? item : JSON.stringify(item);
+    }).join('、');
   }
-
-  if (typeof col.horizontal_align === 'string') {
-    const a = col.horizontal_align.toLowerCase();
-    if (VALID_ALIGN.has(a)) out.horizontal_align = a;
+  if (typeof v === 'object') {
+    if ('text' in v) return String(v.text);
+    return JSON.stringify(v);
   }
-
-  if (out.data_type === 'number' && col.format && typeof col.format === 'object') {
-    const fmt = {};
-    if (typeof col.format.symbol === 'string') fmt.symbol = col.format.symbol;
-    if (typeof col.format.precision === 'number') fmt.precision = col.format.precision;
-    if (typeof col.format.separator === 'boolean') fmt.separator = col.format.separator;
-    if (Object.keys(fmt).length) out.format = fmt;
-  }
-
-  if (out.data_type === 'date' && typeof col.date_format === 'string') {
-    out.date_format = col.date_format;
-  }
-
-  return out;
+  return String(v);
 }
 
+/**
+ * table 组件已降级为 markdown 输出（2026-04-20）：
+ *   飞书 table 组件对 column.data_type 严校验，LLM 随手产非法别名就 column idx:N
+ *   整张卡挂。之前尝试 normalizer 别名映射 + 白名单字段过滤都不够稳。决定弃用
+ *   飞书 table 组件，保留 [[table]] 语法但 renderer 在服务端转成 markdown 表格。
+ *
+ *   收益：
+ *     - 再也不会因 schema 错挂整张卡（markdown 是纯文本）
+ *     - LLM 输入 schema 不变（columns + rows），无需改 prompt 结构
+ *     - 飞书 markdown 组件支持合理渲染（有边框的表格）
+ *   代价：
+ *     - 没有分页 / 排序 / 列宽 / 富列类型（options/persons/date 退化为文本）
+ */
 async function renderTable(body, counter) {
   if (!body || !body.trim()) {
     return blockFallback('table', counter, '（table markup 缺 body）');
@@ -517,31 +495,30 @@ async function renderTable(body, counter) {
     return blockFallback('table', counter, '（table JSON 格式错或无法提取）');
   }
 
-  const rawColumns = Array.isArray(spec.columns) ? spec.columns : [];
+  const columns = Array.isArray(spec.columns) ? spec.columns : [];
   const rows = Array.isArray(spec.rows) ? spec.rows : [];
-  if (rawColumns.length === 0) {
+  if (columns.length === 0) {
     return blockFallback('table', counter, '（table 缺 columns）');
   }
 
-  const columns = rawColumns.map(normalizeColumn).filter(Boolean);
-  if (columns.length === 0) {
-    return blockFallback('table', counter, '（table columns 全部不合法）');
-  }
-  if (columns.length !== rawColumns.length) {
-    console.warn(`[Bot/Markup/Table] ${rawColumns.length - columns.length} 列因缺 name 被丢弃`);
-  }
+  const headers = columns.map(c => String(c?.display_name || c?.name || ''));
+  const separators = columns.map(() => '---');
+  const lines = [
+    `| ${headers.join(' | ')} |`,
+    `| ${separators.join(' | ')} |`,
+    ...rows.map(row =>
+      `| ${columns.map(c => cellToMd(row?.[c?.name])).join(' | ')} |`
+    ),
+  ];
 
-  const page_size = Math.max(1, Math.min(10, Number(spec.page_size) || 5));
   const elementId = blockId('table', counter);
   return {
     placement: 'block',
     elementId,
     elements: [{
-      tag: 'table',
+      tag: 'markdown',
       element_id: elementId,
-      page_size,
-      columns,
-      rows,
+      content: lines.join('\n'),
     }],
   };
 }
