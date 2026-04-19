@@ -32,6 +32,69 @@ function blockId(prefix, counter) {
   return `markup_${prefix}_${counter}`;
 }
 
+/**
+ * 从污染的 fenced body 里提取第一个平衡的 JSON **对象** `{...}` 子串。
+ * 场景：LLM 偶尔把 fenced tag 当分组标题重复 emit（见 2026-04-20 case）：
+ *   body = "` 标题\n[[kpi]]\n{\"items\":[...]}\n"
+ * 直接 JSON.parse(body) 挂。先扫出合法 JSON 对象子串再 parse。
+ *
+ * 只认 `{` 不认 `[`：kpi/chart/table 顶层都是对象；且 `[[kpi]]` 里的 `[[` 会被
+ * `[` 起点算法误判成空数组，必须排除。
+ *
+ * 字符串内部的 `{` / `}` 跳过（简易 state machine 处理 "..." + 转义）。
+ * @returns {string|null} 平衡的对象子串，找不到返回 null
+ */
+function extractFirstJsonBlock(text) {
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (esc) { esc = false; continue; }
+    if (inStr) {
+      if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * 稳健解析 fenced body：先直接 parse，失败再提取第一个平衡 JSON 子串。
+ * @param {string} body
+ * @param {string} label - 日志用（'Chart'/'Table'/'Kpi'）
+ * @returns {object|null}
+ */
+function parseFencedBody(body, label) {
+  const trimmed = (body || '').trim();
+  if (!trimmed) return null;
+  try { return JSON.parse(trimmed); } catch (_) { /* 落下面 */ }
+  const extracted = extractFirstJsonBlock(trimmed);
+  if (!extracted) {
+    console.warn(`[Bot/Markup/${label}] body 里找不到 JSON 对象, 首 200 字:`, trimmed.slice(0, 200));
+    return null;
+  }
+  try {
+    const spec = JSON.parse(extracted);
+    if (extracted !== trimmed) {
+      console.log(`[Bot/Markup/${label}] body 被污染（含前后噪音），已容错提取 JSON 子串（${extracted.length}/${trimmed.length} 字）`);
+    }
+    return spec;
+  } catch (err) {
+    console.warn(`[Bot/Markup/${label}] 提取后 JSON.parse 仍失败: ${err.message}，首 200 字:`, extracted.slice(0, 200));
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────
 //  inline 渲染
 // ─────────────────────────────────────────────
@@ -271,12 +334,9 @@ async function renderChart(subType, body, counter) {
   if (!body || !body.trim()) {
     return blockFallback('chart', counter, '（chart markup 缺 body）');
   }
-  let spec;
-  try {
-    spec = JSON.parse(body);
-  } catch (err) {
-    console.warn('[Bot/Markup/Chart] JSON 解析失败:', err.message, 'body=', body.slice(0, 200));
-    return blockFallback('chart', counter, `（chart JSON 格式错：${err.message}）`);
+  const spec = parseFencedBody(body, 'Chart');
+  if (!spec) {
+    return blockFallback('chart', counter, '（chart JSON 格式错或无法提取）');
   }
 
   const type = (subType || 'line').toLowerCase();
@@ -341,12 +401,9 @@ async function renderKpi(body, counter) {
   if (!body || !body.trim()) {
     return blockFallback('kpi', counter, '（kpi markup 缺 body）');
   }
-  let spec;
-  try {
-    spec = JSON.parse(body);
-  } catch (err) {
-    console.warn('[Bot/Markup/Kpi] JSON 解析失败:', err.message, 'body=', body.slice(0, 200));
-    return blockFallback('kpi', counter, `（kpi JSON 格式错：${err.message}）`);
+  const spec = parseFencedBody(body, 'Kpi');
+  if (!spec) {
+    return blockFallback('kpi', counter, '（kpi JSON 格式错或无法提取）');
   }
 
   const items = Array.isArray(spec.items) ? spec.items : [];
@@ -398,12 +455,9 @@ async function renderTable(body, counter) {
   if (!body || !body.trim()) {
     return blockFallback('table', counter, '（table markup 缺 body）');
   }
-  let spec;
-  try {
-    spec = JSON.parse(body);
-  } catch (err) {
-    console.warn('[Bot/Markup/Table] JSON 解析失败:', err.message, 'body=', body.slice(0, 200));
-    return blockFallback('table', counter, `（table JSON 格式错：${err.message}）`);
+  const spec = parseFencedBody(body, 'Table');
+  if (!spec) {
+    return blockFallback('table', counter, '（table JSON 格式错或无法提取）');
   }
 
   const rawColumns = Array.isArray(spec.columns) ? spec.columns : [];
