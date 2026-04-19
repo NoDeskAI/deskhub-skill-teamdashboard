@@ -23,6 +23,7 @@ import { registerUmamiTools } from './tools/umami.js';
 // import { registerDeskclawTools } from './tools/deskclaw.js';
 import { registerSystemTools } from './tools/system.js';
 import { registerNotifyTools } from './tools/notify.js';
+import { registerFileTools } from './tools/files.js';
 
 const router = Router();
 
@@ -87,6 +88,7 @@ function createMcpServer(auth) {
   // registerDeskclawTools(server, auth);
   registerSystemTools(server, auth);
   registerNotifyTools(server, auth);
+  registerFileTools(server, auth);
 
   return server;
 }

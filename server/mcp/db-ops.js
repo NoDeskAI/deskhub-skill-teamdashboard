@@ -168,6 +168,30 @@ export function deleteVariant(variantId) {
   if (plan) logChange('variant', variantId, 'deleted', `工单「${plan.name}」删除方案「${variant.name}」`, '', plan.priority);
 }
 
+/**
+ * 把文件追加到 variant.attachments JSON 数组
+ * @param {string} variantId
+ * @param {Array<{path, originalName, size}>} fileEntries - multer output 兼容格式
+ * @returns {Array} 更新后的完整 attachments 数组
+ */
+export function appendVariantFiles(variantId, fileEntries) {
+  const variant = db.prepare('SELECT * FROM variants WHERE id = ?').get(variantId);
+  if (!variant) throw new Error('方案不存在');
+  const plan = db.prepare('SELECT status, name, priority FROM plans WHERE id = ?').get(variant.plan_id);
+  if (plan && plan.status === 'done') throw new Error('工单已定稿，无法上传附件');
+
+  const existing = parseJSON(variant.attachments);
+  const merged = existing.concat(fileEntries);
+  db.prepare(`UPDATE variants SET attachments = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(JSON.stringify(merged), variantId);
+
+  logChange('variant', variantId, 'updated',
+    `方案「${variant.name}」上传 ${fileEntries.length} 个附件`,
+    variant.uploader, plan ? plan.priority : 'medium');
+
+  return merged;
+}
+
 // ============================================================
 //  评分 (Scores)
 // ============================================================
