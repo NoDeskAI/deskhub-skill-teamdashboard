@@ -178,6 +178,59 @@ export async function sendText(receiveId, receiveIdType, text) {
   }
 }
 
+/**
+ * 上传文件到飞书 CDN，返回 file_key
+ *
+ * 注意：im.v1.file.create 同 CardKit 一样是 lark SDK 调用，SDK 不抛业务错误，
+ * 必须用 ensureOk() 校验 code。
+ *
+ * @param {Buffer} buffer - 文件字节
+ * @param {string} filename - 原文件名（含扩展名，如 "report.pdf"）
+ * @param {string} fileType - pdf / doc / xls / ppt / opus / mp4 / stream 之一
+ * @returns {Promise<string>} file_key（用于 send_file_message 的 content.file_key）
+ */
+export async function uploadFileToFeishu(buffer, filename, fileType = 'stream') {
+  if (!client) throw new Error('飞书 client 未初始化');
+  if (!Buffer.isBuffer(buffer)) throw new Error('uploadFileToFeishu: 参数必须是 Buffer');
+  if (buffer.length === 0) throw new Error('文件内容为空');
+
+  const res = await client.im.v1.file.create({
+    data: {
+      file_type: fileType,
+      file_name: filename,
+      file: buffer,
+    },
+  });
+  ensureOk('im.v1.file.create', res);
+  const fileKey = res?.data?.file_key;
+  if (!fileKey) throw new Error('im.v1.file.create 未返回 file_key');
+  return fileKey;
+}
+
+/**
+ * 发送文件消息给目标（通过 file_key 引用已上传的文件）
+ *
+ * 注意：file_key 的 TTL 飞书未公开文档，为稳妥起见调用方应每次发送前重新 uploadFileToFeishu，
+ * 不缓存 file_key 跨消息复用。
+ *
+ * @param {string} receiveId
+ * @param {'open_id'|'chat_id'|'user_id'|'union_id'} receiveIdType
+ * @param {string} fileKey
+ */
+export async function sendFileMessage(receiveId, receiveIdType, fileKey) {
+  if (!client) throw new Error('飞书 client 未初始化');
+  const res = await client.im.v1.message.create({
+    params: { receive_id_type: receiveIdType },
+    data: {
+      receive_id: receiveId,
+      msg_type: 'file',
+      content: JSON.stringify({ file_key: fileKey }),
+    },
+  });
+  ensureOk('sendFileMessage', res);
+  return res?.data?.message_id || null;
+}
+
 // ============================================================
 //  CardKit v1（卡片实体 + 组件级流式更新）
 //

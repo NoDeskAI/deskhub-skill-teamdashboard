@@ -20,11 +20,11 @@ import {
   submitScores, editScore, deleteScore, appendVariantFiles,
 } from '../mcp/db-ops.js';
 import {
-  listDeskhubSkills, getDeskhubSkill,
+  listDeskhubSkills, getDeskhubSkill, fetchDeskhubFile,
   getUmamiStats, getUmamiActive,
 } from '../mcp/proxy-ops.js';
 import db from '../db/init.js';
-import { createAndSendCard } from './feishu.js';
+import { createAndSendCard, uploadFileToFeishu, sendFileMessage } from './feishu.js';
 import { buildPersonalCard } from './card-templates.js';
 
 // ── 工具定义（Anthropic / MiniMax 兼容格式）──
@@ -263,6 +263,34 @@ export const TOOL_DEFINITIONS = [
       required: ['variant_id', 'filename', 'content'],
     },
   },
+
+  // ========================================================
+  //  DeskHub 文件读取 + 飞书发附件
+  // ========================================================
+  {
+    name: 'get_deskhub_skill_file',
+    description: '读取 DeskHub 上某个技能里的单个文本文件内容（如 SKILL.md / 源码 / 示例）。传入技能 slug 和文件相对路径。返回文件内容文本。用户问"这个技能是怎么实现的"、"看看 XXX 技能的 SKILL.md" 时用。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: '技能 slug，如 ppt-generator' },
+        path: { type: 'string', description: '文件相对路径，如 "SKILL.md" 或 "scripts/agenda.py"' },
+      },
+      required: ['slug', 'path'],
+    },
+  },
+  {
+    name: 'send_file_to_user',
+    description: '把一个文本文件以飞书附件消息发送给当前对话的用户。用户说"把 XXX 发给我"、"把你刚写的方案保存成文件给我"、"下载 XXX" 时用。文件内容由你直接提供（或先用 get_deskhub_skill_file 拿到内容再来这里发）。',
+    input_schema: {
+      type: 'object',
+      properties: {
+        filename: { type: 'string', description: '文件名（含扩展名，如 "方案v1.md"、"评测报告.md"）' },
+        content: { type: 'string', description: '文件内容（UTF-8 文本，通常是 markdown）' },
+      },
+      required: ['filename', 'content'],
+    },
+  },
 ];
 
 // 闲聊工具集（未绑定用户）— 不含平台数据查询和通知
@@ -462,6 +490,47 @@ export async function executeTool(name, input = {}, context = {}) {
       }
       deleteScore(input.score_id);
       return { ok: true, score_id: input.score_id, note: '评分已删除' };
+    }
+
+    case 'get_deskhub_skill_file': {
+      const { slug, path } = input;
+      if (!slug || !path) throw new Error('slug 和 path 必填');
+      const result = await fetchDeskhubFile(slug, path);
+      return {
+        slug, path,
+        filename: result.filename,
+        content: result.content,
+        size: result.content.length,
+      };
+    }
+
+    case 'send_file_to_user': {
+      const user = context?.boundUser;
+      const openId = context?.chatContext?.openId;
+      if (!openId) {
+        throw new Error('send_file_to_user 需要当前对话 open_id，未找到（请在私聊里试）');
+      }
+      const { filename, content } = input;
+      if (!filename || content === undefined) {
+        throw new Error('filename 和 content 必填');
+      }
+      const buf = Buffer.from(String(content), 'utf8');
+      if (buf.length === 0) throw new Error('文件内容为空');
+      if (buf.length > 30 * 1024 * 1024) throw new Error('文件超 30MB（飞书上限）');
+
+      // 判断 file_type：按后缀取最相近的飞书枚举
+      const ext = filename.toLowerCase().split('.').pop();
+      const typeMap = { pdf: 'pdf', doc: 'doc', docx: 'doc', xls: 'xls', xlsx: 'xls', ppt: 'ppt', pptx: 'ppt' };
+      const fileType = typeMap[ext] || 'stream';
+
+      const fileKey = await uploadFileToFeishu(buf, filename, fileType);
+      const messageId = await sendFileMessage(openId, 'open_id', fileKey);
+      console.log(`[Bot/Tool] send_file_to_user 发送成功: filename=${filename} size=${buf.length} messageId=${messageId}`);
+      return {
+        ok: true, filename, size: buf.length,
+        sent_to: user?.username || openId,
+        note: `已发送「${filename}」（${(buf.length / 1024).toFixed(1)}KB）`,
+      };
     }
 
     case 'proxy_upload_file': {

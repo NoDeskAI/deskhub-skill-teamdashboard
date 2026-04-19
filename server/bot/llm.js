@@ -369,7 +369,7 @@ function buildSystem(boundUser, toolLog) {
  * @param {string[]} [toolLog]
  * @returns {Promise<{ text, toolSummaries }>}
  */
-export async function chat(userText, history = [], onProgress = null, boundUser = null, toolLog = []) {
+export async function chat(userText, history = [], onProgress = null, boundUser = null, toolLog = [], chatContext = {}) {
   const tools = boundUser
     ? withToolsCache(TOOL_DEFINITIONS)
     : TOOL_DEFINITIONS_CHAT_ONLY;
@@ -390,8 +390,8 @@ export async function chat(userText, history = [], onProgress = null, boundUser 
       tools,
       thinking: { type: 'enabled', budget_tokens: THINKING_BUDGET },
       interleaved: true,
-      // 注入 boundUser 给 proxy_* 工具做代笔身份 + 角色校验
-      executeTool: (name, input) => executeTool(name, input, { boundUser }),
+      // 注入 boundUser + chatContext（openId 等）给 proxy_* 和 send_file_to_user 工具
+      executeTool: (name, input) => executeTool(name, input, { boundUser, chatContext }),
 
       onTextChunk: (delta, round) => emit({ type: 'text_chunk', delta, round }),
       onThinkingChunk: (delta, round) => emit({ type: 'thinking_chunk', delta, round }),

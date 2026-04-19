@@ -54,6 +54,35 @@ export async function getDeskhubVersions(query = {}) {
   return json.data;
 }
 
+/**
+ * 下载 DeskHub 技能内的单个文件（目前只支持文本文件；接口返回 JSON 包一层）
+ * @param {string} slug - 技能 slug
+ * @param {string} filePath - 文件相对路径（如 "SKILL.md"、"scripts/agenda.py"）
+ * @returns {Promise<{content: string, filename: string}>}
+ */
+export async function fetchDeskhubFile(slug, filePath) {
+  const clean = String(filePath || '').replace(/^\/+/, '');
+  const cacheKey = `mcp:deskhub:file:${slug}:${clean}`;
+  const hit = getCache(cacheKey);
+  if (hit) return hit.data;
+
+  // 路径里可能有 /，encodeURIComponent 会过度编码——按段 encode 保留结构
+  const encodedPath = clean.split('/').map(encodeURIComponent).join('/');
+  const url = `${DESKHUB_BASE()}/api/v1/skills/${encodeURIComponent(slug)}/files/${encodedPath}`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error(`DeskHub file ${res.status}: ${url}`);
+
+  const json = await res.json();
+  // 响应结构：{success: true, data: {content: "..."} }
+  const content = typeof json?.data?.content === 'string' ? json.data.content : '';
+  if (!content) throw new Error(`DeskHub 文件 ${slug}/${clean} 返回空内容`);
+
+  const filename = clean.split('/').pop() || clean;
+  const out = { content, filename };
+  setCache(cacheKey, out, 600);
+  return out;
+}
+
 export function clearDeskhubCache() {
   clearAll();
 }

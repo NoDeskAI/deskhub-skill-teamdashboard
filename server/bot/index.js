@@ -875,7 +875,7 @@ async function handleMessage(text, chatId, userId, chatType) {
 
     try {
       const { messages, toolLog } = getSession(userId);
-      const { text: reply, toolSummaries } = await chat(text, messages, onProgress, boundUser, toolLog);
+      const { text: reply, toolSummaries } = await chat(text, messages, onProgress, boundUser, toolLog, { openId: userId });
       updateSession(userId, text, reply, toolSummaries);
     } catch (err) {
       console.error('[Bot] 消息处理错误:', err);
