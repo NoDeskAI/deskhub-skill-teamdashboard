@@ -406,11 +406,26 @@ async function renderTable(body, counter) {
     return blockFallback('table', counter, `（table JSON 格式错：${err.message}）`);
   }
 
-  const columns = Array.isArray(spec.columns) ? spec.columns : [];
+  const rawColumns = Array.isArray(spec.columns) ? spec.columns : [];
   const rows = Array.isArray(spec.rows) ? spec.rows : [];
-  if (columns.length === 0) {
+  if (rawColumns.length === 0) {
     return blockFallback('table', counter, '（table 缺 columns）');
   }
+
+  // 飞书 table columns.width 只接受字符串（'auto' / 'weighted' / '120px'）。
+  // LLM 偶尔会产 number（踩坑见 2026-04-20 log: code=300315 expected string for width, but: 240）。
+  // 容错：number → '{n}px'；非合法字符串直接丢字段，让飞书用默认。
+  const columns = rawColumns.map(col => {
+    if (!col || typeof col !== 'object') return col;
+    const w = col.width;
+    if (w === undefined || w === null) return col;
+    if (typeof w === 'string') return col;
+    if (typeof w === 'number' && Number.isFinite(w)) {
+      return { ...col, width: `${w}px` };
+    }
+    const { width: _drop, ...rest } = col;
+    return rest;
+  });
 
   const page_size = Math.max(1, Math.min(10, Number(spec.page_size) || 5));
   const elementId = blockId('table', counter);

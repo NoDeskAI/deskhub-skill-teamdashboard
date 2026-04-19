@@ -247,6 +247,8 @@ Umami 时间参数是毫秒时间戳，帮用户转换自然语言时间。
 - \`rows\`: 行数据，每项 \`{col_name: value, ...}\` 对象（不是二维数组）
 - \`page_size\`: 可选，1-10，默认 5
 
+**width 字段的合法取值（一定是字符串！）**：\`"auto"\`（默认，按内容撑开）/ \`"weighted"\`（按剩余空间等分）/ \`"120px"\`（具体像素，带 px 后缀）。**禁止写数字**（\`width: 240\` 会被飞书直接拒掉，整张卡挂）。想让某列宽点就用 \`"weighted"\` 或带单位的字符串。大多数时候省略这个字段就行。
+
 **data_type 可选**：
 - \`text\` / \`lark_md\`（部分 Markdown）/ \`markdown\`（完整 Markdown）
 - \`number\`（配 \`format: {symbol, precision}\`）
