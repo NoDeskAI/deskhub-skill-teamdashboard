@@ -155,6 +155,27 @@ try {
   console.warn('[db] feishu_open_id migration warning:', e.message);
 }
 
+// --- 迁移：variants / scores 加代理身份字段（author_type / proxy_author_id / proxy_metadata）---
+// 用于标记"小合代笔"：author_type='ai' 且 proxy_author_id 记录委托者 username
+try {
+  const proxyCols = [
+    ['author_type', "TEXT DEFAULT 'human'"],
+    ['proxy_author_id', "TEXT DEFAULT NULL"],
+    ['proxy_metadata', "TEXT DEFAULT NULL"],
+  ];
+  for (const table of ['variants', 'scores']) {
+    const existing = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+    for (const [col, type] of proxyCols) {
+      if (!existing.includes(col)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+        console.log(`[db] Migrated: added column ${table}.${col}`);
+      }
+    }
+  }
+} catch (e) {
+  console.warn('[db] proxy fields migration warning:', e.message);
+}
+
 console.log(`[db] SQLite ready at ${DB_PATH}`);
 
 export default db;

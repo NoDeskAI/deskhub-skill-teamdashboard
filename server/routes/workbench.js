@@ -51,6 +51,8 @@ router.get('/plans', (req, res) => {
       (scoreMap[s.variant_id] ??= []).push({
         id: s.id, tester: s.tester, dimId: s.dim_id, value: s.value,
         comment: s.comment, date: fmtDate(s.created_at), evalDoc: s.eval_doc,
+        authorType: s.author_type || 'human',
+        proxyAuthorId: s.proxy_author_id || null,
       });
     }
 
@@ -62,6 +64,8 @@ router.get('/plans', (req, res) => {
         link: v.link, content: v.content,
         attachments: parseJSON(v.attachments),
         scores: scoreMap[v.id] || [],
+        authorType: v.author_type || 'human',
+        proxyAuthorId: v.proxy_author_id || null,
       });
     }
 
@@ -196,8 +200,16 @@ router.post('/plans/:planId/variants', requireRole('admin', 'tester', 'member'),
 
     const id = 'v' + uid();
     const attStr = typeof attachments === 'string' ? attachments : JSON.stringify(attachments);
-    db.prepare(`INSERT INTO variants (id, plan_id, name, uploader, description, link, content, attachments) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, planId, name, uploader, desc, link, content, attStr);
+
+    // 代理身份字段：若是小合代笔，author_type='ai' + proxy_author_id=委托者
+    const authorType = req.xiaoheProxy ? 'ai' : 'human';
+    const proxyAuthorId = req.xiaoheProxy ? req.proxyAuthorId : null;
+    const proxyMetadata = req.xiaoheProxy
+      ? JSON.stringify({ requested_at: new Date().toISOString() })
+      : null;
+
+    db.prepare(`INSERT INTO variants (id, plan_id, name, uploader, description, link, content, attachments, author_type, proxy_author_id, proxy_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, planId, name, uploader, desc, link, content, attStr, authorType, proxyAuthorId, proxyMetadata);
 
     const v = db.prepare('SELECT * FROM variants WHERE id = ?').get(id);
     res.status(201).json(local({
@@ -225,6 +237,13 @@ router.put('/variants/:id', requireRole('admin', 'tester', 'member'), (req, res)
     // 归属校验：非 admin 只能编辑自己的方案
     if (req.role !== 'admin' && variant.uploader !== req.user) {
       return res.status(403).json({ error: '只能编辑自己的方案' });
+    }
+
+    // 代理校验：小合只能改自己代笔的 AI 内容
+    if (req.xiaoheProxy) {
+      if (variant.author_type !== 'ai' || variant.proxy_author_id !== req.proxyAuthorId) {
+        return res.status(403).json({ error: '小合只能改动自己代笔的方案' });
+      }
     }
 
     const { name, desc, link, content, attachments } = req.body;
@@ -260,7 +279,12 @@ router.delete('/variants/:id', requireRole('admin', 'tester', 'member'), (req, r
     const lockMsg = checkPlanNotDone(variant.plan_id);
     if (lockMsg) return res.status(403).json({ error: lockMsg });
 
-    if (req.role !== 'admin') {
+    // 代理校验：小合只能删自己代笔的 AI 内容
+    if (req.xiaoheProxy) {
+      if (variant.author_type !== 'ai' || variant.proxy_author_id !== req.proxyAuthorId) {
+        return res.status(403).json({ error: '小合只能删除自己代笔的方案' });
+      }
+    } else if (req.role !== 'admin') {
       // 归属校验
       if (variant.uploader !== req.user) {
         return res.status(403).json({ error: '只能删除自己的方案' });
@@ -313,12 +337,19 @@ router.post('/variants/:variantId/scores', requireRole('admin', 'tester'), (req,
       }
     }
 
-    const insert = db.prepare(`INSERT INTO scores (id, variant_id, plan_id, tester, dim_id, value, comment, eval_doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    // 代理身份字段
+    const authorType = req.xiaoheProxy ? 'ai' : 'human';
+    const proxyAuthorId = req.xiaoheProxy ? req.proxyAuthorId : null;
+    const proxyMetadata = req.xiaoheProxy
+      ? JSON.stringify({ requested_at: new Date().toISOString() })
+      : null;
+
+    const insert = db.prepare(`INSERT INTO scores (id, variant_id, plan_id, tester, dim_id, value, comment, eval_doc, author_type, proxy_author_id, proxy_metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const created = [];
     const insertMany = db.transaction((entries) => {
       for (const s of entries) {
         const id = 's' + uid();
-        insert.run(id, variantId, variant.plan_id, tester, s.dim_id, s.value, s.comment || '', evalDoc || null);
+        insert.run(id, variantId, variant.plan_id, tester, s.dim_id, s.value, s.comment || '', evalDoc || null, authorType, proxyAuthorId, proxyMetadata);
         created.push({ id, tester, dimId: s.dim_id, value: s.value, comment: s.comment || '', evalDoc: evalDoc || null });
       }
     });
@@ -347,6 +378,13 @@ router.put('/scores/:id', requireRole('admin', 'tester'), (req, res) => {
     // 归属校验：非 admin 只能改自己的
     if (req.role !== 'admin' && score.tester !== req.user) {
       return res.status(403).json({ error: '只能编辑自己的评分' });
+    }
+
+    // 代理校验：小合只能改自己代笔的 AI 评分
+    if (req.xiaoheProxy) {
+      if (score.author_type !== 'ai' || score.proxy_author_id !== req.proxyAuthorId) {
+        return res.status(403).json({ error: '小合只能改动自己代笔的评分' });
+      }
     }
 
     const { value, comment, evalDoc } = req.body;
@@ -387,6 +425,13 @@ router.delete('/scores/:id', requireRole('admin', 'tester'), (req, res) => {
     // 归属校验：非 admin 只能删自己的
     if (req.role !== 'admin' && score.tester !== req.user) {
       return res.status(403).json({ error: '只能删除自己的评分' });
+    }
+
+    // 代理校验：小合只能删自己代笔的 AI 评分
+    if (req.xiaoheProxy) {
+      if (score.author_type !== 'ai' || score.proxy_author_id !== req.proxyAuthorId) {
+        return res.status(403).json({ error: '小合只能删除自己代笔的评分' });
+      }
     }
 
     db.prepare('DELETE FROM scores WHERE id = ?').run(id);
