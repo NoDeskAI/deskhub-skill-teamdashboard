@@ -1,9 +1,7 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, useState } from "react";
 import App from "./App.jsx";
 import CardPreview from "./pages/CardPreview/index.jsx";
-
-const EditorialApp = lazy(() => import("../src-editorial/App.jsx"));
 
 function Root() {
   const [hash, setHash] = useState(typeof window !== 'undefined' ? window.location.hash : '');
@@ -14,13 +12,6 @@ function Root() {
   }, []);
 
   if (hash === '#card-mocks') return <CardPreview />;
-  if (hash === '#editorial') {
-    return (
-      <Suspense fallback={<div style={{ padding: 40, fontFamily: 'system-ui' }}>Loading editorial…</div>}>
-        <EditorialApp />
-      </Suspense>
-    );
-  }
   return <App />;
 }
 

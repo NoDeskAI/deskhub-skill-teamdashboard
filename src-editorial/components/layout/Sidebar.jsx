@@ -1,15 +1,15 @@
 import { useState, useEffect } from "react";
-import { ChevronLeft, LogOut, Settings2, Users, KeyRound, ChevronUp, Sparkles } from "lucide-react";
+import { ChevronLeft, LogOut, Settings2, Users, KeyRound, ChevronUp, Sparkles, Undo2 } from "lucide-react";
 import { TABS } from "../../constants/tabs.js";
 import { ROLES } from "../../constants/roles.js";
-import { COLOR, GAP, FONT_SIZE, FONT_MONO, FONT_SANS } from "../../constants/theme.js";
+import { COLOR, GAP, FONT_SIZE, FONT_MONO, FONT_SANS, FONT_SERIF } from "../../constants/theme.js";
 
 const COLLAPSED_W = 56;
 const EASE = "0.3s cubic-bezier(0.25, 1, 0.5, 1)";
 const COL_PAD = 4;
 const ICON_COL = COLLAPSED_W - COL_PAD * 2;
 
-export default function Sidebar({ tab, setTab, role, user, onLogout, collapsed, setCollapsed, onResetBrowse, onOpenDimMgr, onOpenUserMgr, onOpenChangePwd }) {
+export default function Sidebar({ tab, setTab, role, user, onLogout, collapsed, setCollapsed, onResetBrowse, onOpenDimMgr, onOpenUserMgr, onOpenChangePwd, onOpenSettings }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Sidebar 收起时自动关闭抽屉
@@ -21,8 +21,11 @@ export default function Sidebar({ tab, setTab, role, user, onLogout, collapsed, 
 
   // 构建菜单项（按角色动态）
   const menuItems = [];
-  // Editorial 预览：切到新面板（hash 路由，#editorial 会 lazy-load 新面板）
-  menuItems.push({ icon: Sparkles, label: "Editorial 预览", onClick: () => { window.location.hash = '#editorial'; } });
+  // 回老面板：清 hash 就能切回 src/App
+  menuItems.push({ icon: Undo2, label: "回到经典面板", onClick: () => {
+    if (window.location.hash) { window.history.pushState(null, '', window.location.pathname); window.dispatchEvent(new HashChangeEvent('hashchange')); }
+  }});
+  if (onOpenSettings) menuItems.push({ icon: Sparkles, label: "主题与音乐", onClick: onOpenSettings });
   if (onOpenUserMgr) menuItems.push({ icon: Users, label: "用户管理", onClick: onOpenUserMgr });
   if (onOpenChangePwd) menuItems.push({ icon: KeyRound, label: "修改密码", onClick: onOpenChangePwd });
   if (onOpenDimMgr) menuItems.push({ icon: Settings2, label: "维度设置", onClick: onOpenDimMgr });
@@ -38,8 +41,10 @@ export default function Sidebar({ tab, setTab, role, user, onLogout, collapsed, 
     <div
       onClick={() => { if (drawerOpen) setDrawerOpen(false); }}
       style={{
-        width: collapsed ? COLLAPSED_W : 200, flexShrink: 0,
-        background: COLOR.bgSide,
+        width: collapsed ? COLLAPSED_W : 220, flexShrink: 0,
+        background: "rgba(243, 240, 236, 0.72)",
+        backdropFilter: "blur(24px) saturate(1.3)",
+        WebkitBackdropFilter: "blur(24px) saturate(1.3)",
         borderRight: `1px solid ${COLOR.border}`,
         display: "flex", flexDirection: "column",
         transition: `width ${EASE}`,
@@ -90,8 +95,10 @@ export default function Sidebar({ tab, setTab, role, user, onLogout, collapsed, 
         </div>
         {!collapsed && (
           <div style={{ textAlign: "left" }}>
-            <div style={{ fontFamily: FONT_MONO, fontSize: FONT_SIZE.xl, fontWeight: 700, color: COLOR.text, letterSpacing: 0.8, lineHeight: 1.1 }}>DeskHub</div>
-            <div style={{ fontFamily: FONT_SANS, fontSize: FONT_SIZE.xs, color: COLOR.sub, marginTop: 2, letterSpacing: 2, textTransform: "uppercase", lineHeight: 1.1 }}>TEAMBOARD</div>
+            <div style={{ fontFamily: FONT_SERIF, fontSize: 24, fontWeight: 400, color: COLOR.text, letterSpacing: -0.3, lineHeight: 1.05 }}>
+              deskhub <span style={{ fontStyle: "italic", opacity: 0.8 }}>teamboard</span>
+            </div>
+            <div style={{ fontFamily: FONT_MONO, fontSize: 9, color: COLOR.sub, marginTop: 6, letterSpacing: 2.5, textTransform: "uppercase", lineHeight: 1.1 }}>· editorial preview</div>
           </div>
         )}
       </div>
@@ -104,17 +111,19 @@ export default function Sidebar({ tab, setTab, role, user, onLogout, collapsed, 
             <button key={t.id} onClick={(e) => { e.stopPropagation(); setTab(t.id); onResetBrowse(); }} title={collapsed ? t.label : undefined}
               style={{
                 display: "flex", alignItems: "center",
-                width: "100%", padding: `${GAP.base}px 0`,
+                width: "100%", padding: `${GAP.base}px 6px`,
                 fontFamily: FONT_SANS,
-                fontSize: FONT_SIZE.base, fontWeight: on ? 600 : 400,
-                color: on ? COLOR.btn : COLOR.text5,
-                background: on ? COLOR.bgWhite : "transparent",
-                border: "none", borderRadius: GAP.base, cursor: "pointer",
-                marginBottom: GAP.xs,
-                boxShadow: on ? `0 1px 4px ${COLOR.border}` : "none",
-                transition: "background 0.2s, color 0.2s, box-shadow 0.2s",
+                fontSize: 13.5, fontWeight: on ? 500 : 400,
+                color: on ? "#1a1a1a" : COLOR.text4,
+                background: on ? "rgba(255,253,247,0.85)" : "transparent",
+                border: "none", borderRadius: 999, cursor: "pointer",
+                marginBottom: 4,
+                boxShadow: on
+                  ? "0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.04), 0 0 24px rgba(255,230,180,0.4)"
+                  : "none",
+                transition: "all 0.25s cubic-bezier(0.2,0.7,0.3,1)",
               }}
-              onMouseEnter={e => { if (!on) e.currentTarget.style.background = "rgba(255,255,255,0.4)"; }}
+              onMouseEnter={e => { if (!on) e.currentTarget.style.background = "rgba(255,253,247,0.4)"; }}
               onMouseLeave={e => { if (!on) e.currentTarget.style.background = "transparent"; }}
             >
               <div style={iconCol}>
