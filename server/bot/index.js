@@ -176,31 +176,11 @@ class ChatCardStreamer {
     this.flushState = new Map();
 
     // ── 失败 element 黑名单 ──
-    // 当 insertCardElements 返 false（schema 错/权限错），block 或段从未真正存在，
-    // 但乐观状态机已经同步往 _bodyElements / _currentSegmentId 推进。
-    // 把失败 ID 记在这里，用来：
-    //   1. _aliveAnchor() 把后续 insert/stream 的 target 重定向到最近活 element
-    //   2. flushElement 对失败段直接 skip，不打 API（避 300313 连环噪音）
-    //   3. _finalBodyElements() 在 onComplete 的 card.update 前过滤掉，不让坏 schema 再犯
+    // block insert 失败（schema 错等）时，对应新段从未在飞书上被创建，
+    // 但 _currentSegmentId 已经乐观切过去。用黑名单让 flushElement 在执行时 skip，
+    // 避免对不存在段持续 streamCardText（300313 刷屏）。
+    // _finalBodyElements() 也用它过滤最终 body，避免坏 schema 再次触发 card.update 失败。
     this._failedElementIds = new Set();
-  }
-
-  /**
-   * 把 anchor ID 映射到"一定存在"的 element ID。
-   * targetId 在黑名单里 → 从 _bodyElements 反向找第一个非占位非黑名单的 element。
-   * 兜底永远是 main_text_0（首段，创建卡片时一并存在）。
-   */
-  _aliveAnchor(targetId) {
-    if (!this._failedElementIds.has(targetId)) return targetId;
-    for (let i = this._bodyElements.length - 1; i >= 0; i--) {
-      const el = this._bodyElements[i];
-      if (!el || el._markupPlaceholder) continue;
-      const eid = el.element_id;
-      if (!eid) continue;
-      if (this._failedElementIds.has(eid)) continue;
-      return eid;
-    }
-    return 'main_text_0';
   }
 
   _enqueue(label, fn) {
@@ -341,7 +321,9 @@ class ChatCardStreamer {
       }
       return this._enqueue(`insert thinking_pill_r${round}`, async () => {
         await this.ensureCardCreated();
-        const anchor = this._aliveAnchor(targetSegId);
+        // pill 必须 insert_before 才能出现在当前段上方（视觉）。anchor 若进了黑名单
+        // （上一个 block 挂了把 _currentSegmentId 切到未创建段），退 main_text_0 兜底。
+        const anchor = this._failedElementIds.has(targetSegId) ? 'main_text_0' : targetSegId;
         const ok = await insertCardElements(this.cardId, [pillElement], {
           type: 'insert_before',
           targetElementId: anchor,
@@ -460,12 +442,14 @@ class ChatCardStreamer {
     st.lastFlushTime = Date.now();
     st.lastFlushedLen = content.length;
 
-    // 段在黑名单 → 本地 skip，不打 API、不刷日志（避免 code=300313 not find elementID 刷屏）
+    // schedule 阶段 early-skip：已知失败段不入队
     if (this._failedElementIds.has(elementId)) {
       return Promise.resolve();
     }
 
     return this._enqueue(`stream ${elementId}`, async () => {
+      // 执行阶段再检查：op 排队期间可能有 block insert 失败把 elementId 加进黑名单
+      if (this._failedElementIds.has(elementId)) return;
       await this.ensureCardCreated();
       if (!this.cardId) return;
       await streamCardText(this.cardId, elementId, content);
@@ -598,7 +582,6 @@ class ChatCardStreamer {
     }
 
     const counter = ++this._blockMarkupCounter;
-    const prevSegId = this._currentSegmentId;
 
     // 立即 kick off 数据拉取（不进队列）—— chart/table 的 body 同步传入，不 fetch 外部
     const renderPromise = renderMarkup(tag, args, counter, body);
@@ -606,6 +589,9 @@ class ChatCardStreamer {
     // 生成新段的 element_id 并先在 _segments/_bodyElements 里占位
     const newSegId = `main_text_${this._segments.length}`;
 
+    // 用 append 而不是 insert_after：op queue 已经串行（记忆 bot-streaming-ordering §2），
+    // 调用顺序 = 飞书渲染顺序，不需要 anchor。这样任一 block 失败都不连累下一个，
+    // 根本切断 anchor 依赖链（insert_after 的 anchor 一旦失败就全挂）。
     this._enqueue(`markup block ${tag}#${counter}`, async () => {
       await this.ensureCardCreated();
       if (!this.cardId) return;
@@ -616,27 +602,24 @@ class ChatCardStreamer {
         return;
       }
 
-      // 先插 block 组件。prevSegId 可能已是黑名单（前一个 block 挂了），重定向到活 anchor
-      const anchor1 = this._aliveAnchor(prevSegId);
-      const ok1 = await insertCardElements(this.cardId, result.elements, {
-        type: 'insert_after', targetElementId: anchor1,
-      });
+      // 1) append block 本体
+      const ok1 = await insertCardElements(this.cardId, result.elements, { type: 'append' });
       if (!ok1) {
-        // block 本体插失败（schema 错等）：block 和依赖它作 anchor 的新段都废
+        // block schema 错等 —— 块本身废，依赖它的新段也不建
         this._failedElementIds.add(result.elementId);
         this._failedElementIds.add(newSegId);
-        console.warn(`[Bot/Stream] block markup ${tag}#${counter} 插入失败 → 进黑名单 (elementId=${result.elementId}, seg=${newSegId})，后续 anchor 会重定向`);
+        console.warn(`[Bot/Stream] block markup ${tag}#${counter} append 失败 → 进黑名单 (elementId=${result.elementId}, seg=${newSegId})`);
         return;
       }
-      // 再插空的新段 markdown（text 流将往这里推）
+      // 2) append 空新段 markdown（后续 text 流往这里推）
       const ok2 = await insertCardElements(this.cardId,
         [{ tag: 'markdown', element_id: newSegId, content: '' }],
-        { type: 'insert_after', targetElementId: result.elementId }
+        { type: 'append' }
       );
       if (!ok2) {
-        // block 插成功但新段没建上 → block 保留，段进黑名单（后续文本会 skip 这段）
+        // block 已建成功，但新段没建上 → 段进黑名单，后续 stream op 对该段 skip
         this._failedElementIds.add(newSegId);
-        console.warn(`[Bot/Stream] block markup ${tag}#${counter} 新段 ${newSegId} 插入失败 → 进黑名单`);
+        console.warn(`[Bot/Stream] block markup ${tag}#${counter} 新段 ${newSegId} append 失败 → 进黑名单`);
         return;
       }
       console.log(`[Bot/Stream] block markup ${tag}#${counter} 已插入（新段 ${newSegId}）`);
@@ -689,20 +672,17 @@ class ChatCardStreamer {
     if (idx >= 0) this._bodyElements.splice(idx + 1, 0, newSegEl);
     else this._bodyElements.push(newSegEl);
 
-    // enqueue insert_after 创建新段元素
+    // enqueue append 创建新段元素（op queue 已保证顺序，不需要 anchor）
     this._enqueue(`open seg ${newSegId} after tool`, async () => {
       await this.ensureCardCreated();
       if (!this.cardId) return;
-      const anchor = this._aliveAnchor(prevSegId);
-      const ok = await insertCardElements(this.cardId, [newSegEl], {
-        type: 'insert_after', targetElementId: anchor,
-      });
+      const ok = await insertCardElements(this.cardId, [newSegEl], { type: 'append' });
       if (!ok) {
         this._failedElementIds.add(newSegId);
-        console.warn(`[Bot/Stream] 新段 ${newSegId} 插入失败 after=${anchor} → 进黑名单`);
+        console.warn(`[Bot/Stream] 新段 ${newSegId} append 失败 → 进黑名单`);
         return;
       }
-      console.log(`[Bot/Stream] 新段 ${newSegId} 已插入 after=${anchor}`);
+      console.log(`[Bot/Stream] 新段 ${newSegId} 已 append`);
     });
   }
 
@@ -752,12 +732,33 @@ class ChatCardStreamer {
 
   /**
    * 重建最终 body：
-   *   - 过滤未 resolve 的 markup placeholder（fetch 失败的情况）
+   *   - 救场：失败段累积的文字合并回前一个活段（流式阶段段没建上，文字不能平白丢）
+   *   - 过滤未 resolve 的 markup placeholder（renderer 失败时残留的占位）
    *   - 过滤黑名单里的失败 element（带坏 schema 会让 card.update 整张挂掉）
    *   - 过滤空白 markdown 段（空段 streamCardText 返 code=99992402；留着也是视觉噪音）
    *   - 兜底：空 body 时放一个占位 markdown，避免 card.update body=[] 被拒
    */
   _finalBodyElements() {
+    // 救场：把黑名单段的累积文字并回前一个活 markdown 段的 content 末尾
+    let lastAliveMdIdx = -1;
+    for (let i = 0; i < this._bodyElements.length; i++) {
+      const el = this._bodyElements[i];
+      if (!el) continue;
+      const eid = el.element_id;
+      const isFailedMd = el.tag === 'markdown' && eid && this._failedElementIds.has(eid);
+      if (isFailedMd) {
+        const seg = this._segments.find(s => s.id === eid);
+        if (seg && seg.text && seg.text.trim() && lastAliveMdIdx >= 0) {
+          const alive = this._bodyElements[lastAliveMdIdx];
+          alive.content = (alive.content || '') + '\n' + seg.text;
+        }
+        continue;
+      }
+      if (el.tag === 'markdown' && eid && !el._markupPlaceholder) {
+        lastAliveMdIdx = i;
+      }
+    }
+
     const filtered = this._bodyElements.filter(e => {
       if (!e) return false;
       if (e._markupPlaceholder) return false;
