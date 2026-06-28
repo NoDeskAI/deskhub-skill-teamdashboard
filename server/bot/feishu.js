@@ -111,6 +111,27 @@ export async function initFeishu(onMessage) {
     // —— WS2 临时探针：租户内全部会议（无须机器人参会即可触发，对应 vc:meeting.all_meeting:readonly） ——
     'vc.meeting.all_meeting_started_v1': async (data) => {
       console.log('[InkLoop-WS2/Vc] all_meeting_started_v1', JSON.stringify(data, null, 2));
+      // —— WS2 临时：白名单群里的会议，立刻 invite 机器人入会拿 recording_started/ready 事件 + minute_token ——
+      const TEST_GROUP_CHAT_ID = 'oc_94ec4b9a9c42bc7d104676c6dc46adcd'; // 飞书会议测试群
+      const meeting = data?.meeting;
+      const groupIds = meeting?.security_setting?.group_ids || [];
+      if (!groupIds.includes(TEST_GROUP_CHAT_ID)) return;
+      if (!meeting?.id) { console.log('[InkLoop-WS2/Invite] meeting.id 缺失，跳过'); return; }
+      if (!botOpenId) { console.log('[InkLoop-WS2/Invite] botOpenId 未拿到，跳过'); return; }
+      // 试 5 + 2 个 user_type（5=机器人 在 SDK doc 常见；2 是 invite 文档另一处看到过；都试一下哪个生效）
+      for (const user_type of [5, 2, 4]) {
+        try {
+          const res = await client.vc.v1.meeting.invite({
+            path: { meeting_id: meeting.id },
+            data: { invitees: [{ id: botOpenId, user_type }] },
+            params: { user_id_type: 'open_id' },
+          });
+          console.log(`[InkLoop-WS2/Invite] user_type=${user_type} result`, JSON.stringify(res, null, 2));
+          if (res?.code === 0 || res?.data?.invite_results?.some((r) => r.status === 1)) break;
+        } catch (e) {
+          console.log(`[InkLoop-WS2/Invite] user_type=${user_type} ERROR`, e.message);
+        }
+      }
     },
     'vc.meeting.all_meeting_ended_v1': async (data) => {
       console.log('[InkLoop-WS2/Vc] all_meeting_ended_v1', JSON.stringify(data, null, 2));
