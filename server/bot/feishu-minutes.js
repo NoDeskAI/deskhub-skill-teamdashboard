@@ -193,21 +193,36 @@ function streamToString(rs) {
   });
 }
 
+// 把 lark/axios 抛出的错误归一化：抠出飞书 code/msg 挂到 error 上，方便上层透出
+function normalizeFeishuError(label, e) {
+  let body = e?.response?.data ?? e?.body ?? null;
+  if (Buffer.isBuffer(body)) { try { body = JSON.parse(body.toString('utf8')); } catch { body = { msg: body.toString('utf8').slice(0, 300) }; } }
+  const code = body?.code ?? e?.feishuCode;
+  const msg = body?.msg ?? e?.message;
+  const err = new Error(`${label}: ${code != null ? `code=${code} ` : ''}${msg || 'unknown'}`);
+  err.feishuCode = code;
+  err.feishuMsg = msg;
+  return err;
+}
+
 export async function getMinute(minuteToken, openId) {
   const uat = await getFreshUserAccessToken(openId);
-  const res = await client().minutes.v1.minute.get({ path: { minute_token: minuteToken } }, lark.withUserAccessToken(uat));
-  return ensureOk('minute.get', res);
+  try {
+    const res = await client().minutes.v1.minute.get({ path: { minute_token: minuteToken } }, lark.withUserAccessToken(uat));
+    return ensureOk('minute.get', res);
+  } catch (e) { throw normalizeFeishuError('minute.get', e); }
 }
 
 export async function getTranscript(minuteToken, openId, fileFormat = 'srt') {
   const uat = await getFreshUserAccessToken(openId);
-  // transcript 返回二进制流（writeFile/getReadableStream）
-  const resp = await client().minutes.v1.minuteTranscript.get(
-    { path: { minute_token: minuteToken }, params: { need_speaker: true, need_timestamp: true, file_format: fileFormat } },
-    lark.withUserAccessToken(uat),
-  );
-  const rs = resp.getReadableStream();
-  return streamToString(rs);
+  try {
+    // transcript 返回二进制流（writeFile/getReadableStream）
+    const resp = await client().minutes.v1.minuteTranscript.get(
+      { path: { minute_token: minuteToken }, params: { need_speaker: true, need_timestamp: true, file_format: fileFormat } },
+      lark.withUserAccessToken(uat),
+    );
+    return streamToString(resp.getReadableStream());
+  } catch (e) { throw normalizeFeishuError('transcript', e); }
 }
 
 // ── 续期 daemon：定期刷临期 token（防 idle 期间 refresh_token 自然过期）──
