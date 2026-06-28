@@ -120,22 +120,23 @@ export async function initFeishu(onMessage) {
       const groupIds = meeting?.security_setting?.group_ids || [];
       if (!groupIds.includes(TEST_GROUP_CHAT_ID)) return;
       const meetingNumber = meeting?.meeting_no;
-      const meetingId = meeting?.id;
       if (!meetingNumber) { console.log('[InkLoop-WS2/BotJoin] meeting_no 缺失，跳过'); return; }
-      // 先按 lark-cli 主 hint 试 meeting_number；失败再试 meeting_id 兜底
-      for (const data of [{ meeting_number: meetingNumber }, { meeting_id: meetingId }]) {
-        try {
-          const res = await client.request({
-            method: 'POST',
-            url: 'https://open.feishu.cn/open-apis/vc/v1/bots/join',
-            data,
-          });
-          console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'result', JSON.stringify(res, null, 2));
-          if (res?.code === 0) break;
-        } catch (e) {
-          const body = e?.response?.data ?? e?.body ?? { message: e?.message };
-          console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'ERROR', JSON.stringify(body, null, 2));
-        }
+      // lark-cli 源码 vc_meeting_join.go 确认 payload schema：
+      // { join_type: 1, join_identify: { meeting_no: "..." } }
+      const data = {
+        join_type: 1,
+        join_identify: { meeting_no: meetingNumber },
+      };
+      try {
+        const res = await client.request({
+          method: 'POST',
+          url: 'https://open.feishu.cn/open-apis/vc/v1/bots/join',
+          data,
+        });
+        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'result', JSON.stringify(res, null, 2));
+      } catch (e) {
+        const body = e?.response?.data ?? e?.body ?? { message: e?.message };
+        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'ERROR', JSON.stringify(body, null, 2));
       }
     },
     'vc.meeting.all_meeting_ended_v1': async (data) => {
