@@ -109,11 +109,34 @@ export async function initFeishu(onMessage) {
       console.log('[InkLoop-WS2/Vc] meeting_ended_v1', JSON.stringify(data, null, 2));
     },
     // —— WS2 临时探针：租户内全部会议（无须机器人参会即可触发，对应 vc:meeting.all_meeting:readonly） ——
-    // ⚠️ 撤掉 invite 路径：飞书文档确认 invite API 必须 user_access_token，且 user_type 枚举无"机器人"，
-    //    bot 用 tenant_access_token 调 invite 一定 400/122003；要拿真 recording t0 得走 OAuth 或飞书会议机器人 SDK。
-    //    短期方案降级：t0 用 all_meeting_started.start_time（误差几秒），minute_token 走用户手动转发卡片路径。
     'vc.meeting.all_meeting_started_v1': async (data) => {
       console.log('[InkLoop-WS2/Vc] all_meeting_started_v1', JSON.stringify(data, null, 2));
+      // —— WS2 实验 A：白名单群里的会议立刻调 POST /vc/v1/bots/join 让机器人入会 ——
+      // 端点来自 lark-cli 源码（larksuite/cli VCMeetingJoin）：scope=vc:meeting.bot.join:write，
+      // AuthTypes 包含 bot，所以 tenant_access_token 应可调；lark SDK 没生成 wrapper，用 client.request 手动调。
+      // 字段名 lark-cli 源码暗示是 meeting_number（命令 hint "Join by meeting number"），同时附 meeting_id 兜底。
+      const TEST_GROUP_CHAT_ID = 'oc_94ec4b9a9c42bc7d104676c6dc46adcd'; // 飞书会议测试群
+      const meeting = data?.meeting;
+      const groupIds = meeting?.security_setting?.group_ids || [];
+      if (!groupIds.includes(TEST_GROUP_CHAT_ID)) return;
+      const meetingNumber = meeting?.meeting_no;
+      const meetingId = meeting?.id;
+      if (!meetingNumber) { console.log('[InkLoop-WS2/BotJoin] meeting_no 缺失，跳过'); return; }
+      // 先按 lark-cli 主 hint 试 meeting_number；失败再试 meeting_id 兜底
+      for (const data of [{ meeting_number: meetingNumber }, { meeting_id: meetingId }]) {
+        try {
+          const res = await client.request({
+            method: 'POST',
+            url: 'https://open.feishu.cn/open-apis/vc/v1/bots/join',
+            data,
+          });
+          console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'result', JSON.stringify(res, null, 2));
+          if (res?.code === 0) break;
+        } catch (e) {
+          const body = e?.response?.data ?? e?.body ?? { message: e?.message };
+          console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'ERROR', JSON.stringify(body, null, 2));
+        }
+      }
     },
     'vc.meeting.all_meeting_ended_v1': async (data) => {
       console.log('[InkLoop-WS2/Vc] all_meeting_ended_v1', JSON.stringify(data, null, 2));
