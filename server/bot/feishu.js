@@ -81,11 +81,32 @@ export async function initFeishu(onMessage) {
   // 事件处理器
   const eventDispatcher = new lark.EventDispatcher({}).register({
     'im.message.receive_v1': async (data) => {
+      // —— WS2 临时探针：非 text 消息（妙记卡片等 interactive）全量 log；用完移除 ——
+      const _mt = data?.message?.message_type;
+      if (_mt && _mt !== 'text') {
+        console.log('[InkLoop-WS2/ImEvent]', _mt, JSON.stringify(data, null, 2));
+      }
       try {
         await handleMessageEvent(data, onMessage);
       } catch (err) {
         console.error('[Bot/Feishu] 消息处理错误:', err);
       }
+    },
+    // —— WS2 临时探针：vc 会议事件全量 log；用完移除 ——
+    'vc.meeting.recording_started_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] recording_started_v1', JSON.stringify(data, null, 2));
+    },
+    'vc.meeting.recording_ready_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] recording_ready_v1', JSON.stringify(data, null, 2));
+    },
+    'vc.meeting.recording_ended_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] recording_ended_v1', JSON.stringify(data, null, 2));
+    },
+    'vc.meeting.meeting_started_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] meeting_started_v1', JSON.stringify(data, null, 2));
+    },
+    'vc.meeting.meeting_ended_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] meeting_ended_v1', JSON.stringify(data, null, 2));
     },
   });
 
