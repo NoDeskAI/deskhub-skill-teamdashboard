@@ -108,6 +108,13 @@ export async function initFeishu(onMessage) {
     'vc.meeting.meeting_ended_v1': async (data) => {
       console.log('[InkLoop-WS2/Vc] meeting_ended_v1', JSON.stringify(data, null, 2));
     },
+    // —— WS2 临时探针：租户内全部会议（无须机器人参会即可触发，对应 vc:meeting.all_meeting:readonly） ——
+    'vc.meeting.all_meeting_started_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] all_meeting_started_v1', JSON.stringify(data, null, 2));
+    },
+    'vc.meeting.all_meeting_ended_v1': async (data) => {
+      console.log('[InkLoop-WS2/Vc] all_meeting_ended_v1', JSON.stringify(data, null, 2));
+    },
   });
 
   // WSClient 长连接（无需公网 IP）
