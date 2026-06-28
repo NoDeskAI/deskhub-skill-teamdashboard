@@ -21,16 +21,30 @@ import {
 import { recentMeetings, getMeeting } from '../bot/feishu-events.js';
 
 const router = Router();
-const SHARED_SECRET = process.env.INKLOOP_SHARED_SECRET || '';
 
-// InkLoop 端点鉴权（timingSafeEqual 防时序侧信道）
+function escapeHtml(v) {
+  return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// 回跳白名单：只允许 redirect_uri 同源（或 env 显式列出的）origin，防开放重定向
+function allowedReturnOrigins() {
+  const fallback = new URL(process.env.FEISHU_REDIRECT_URI || 'https://nodeskweb.xiaobuyu.trade/api/feishu/oauth/callback').origin;
+  return new Set((process.env.FEISHU_OAUTH_RETURN_ORIGINS || fallback).split(',').map((s) => s.trim()).filter(Boolean));
+}
+function safeReturnTo(v) {
+  try {
+    const u = new URL(String(v || ''));
+    if (!['http:', 'https:'].includes(u.protocol)) return '';
+    return allowedReturnOrigins().has(u.origin) ? u.toString() : '';
+  } catch { return ''; }
+}
+
+// InkLoop 端点鉴权（先 sha256 再 timingSafeEqual·定长比较不泄露 secret 长度）
 function requireInkloopSecret(req, res, next) {
-  if (!SHARED_SECRET) return res.status(503).json({ error: 'INKLOOP_SHARED_SECRET 未配置' });
-  const got = Buffer.from(req.get('x-inkloop-secret') || '', 'utf8');
-  const want = Buffer.from(SHARED_SECRET, 'utf8');
-  if (got.length !== want.length || !crypto.timingSafeEqual(got, want)) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
+  const secret = process.env.INKLOOP_SHARED_SECRET || '';
+  if (!secret) return res.status(503).json({ error: 'INKLOOP_SHARED_SECRET 未配置' });
+  const got = crypto.createHash('sha256').update(req.get('x-inkloop-secret') || '', 'utf8').digest();
+  const want = crypto.createHash('sha256').update(secret, 'utf8').digest();
+  if (!crypto.timingSafeEqual(got, want)) return res.status(401).json({ error: 'unauthorized' });
   next();
 }
 
@@ -47,9 +61,9 @@ router.get('/oauth/start', (req, res) => {
 // ── 公开：回调 ──
 router.get('/oauth/callback', async (req, res) => {
   const { code, state, error, error_description } = req.query;
-  const page = (title, body) => `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:-apple-system,system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1.5rem;color:#1f2328;line-height:1.6}h1{font-size:1.3rem}.ok{color:#1a7f37}.err{color:#cf222e}code{background:#f6f8fa;padding:.1em .4em;border-radius:4px}</style></head><body>${body}</body></html>`;
+  const page = (title, body) => `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font-family:-apple-system,system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1.5rem;color:#1f2328;line-height:1.6}h1{font-size:1.3rem}.ok{color:#1a7f37}.err{color:#cf222e}code{background:#f6f8fa;padding:.1em .4em;border-radius:4px}</style></head><body>${body}</body></html>`;
   if (error) {
-    return res.status(400).send(page('授权失败', `<h1 class="err">飞书授权失败</h1><p><code>${error}</code> ${error_description || ''}</p>`));
+    return res.status(400).send(page('授权失败', `<h1 class="err">飞书授权失败</h1><p><code>${escapeHtml(error)}</code> ${escapeHtml(error_description || '')}</p>`));
   }
   if (!code || !state) {
     return res.status(400).send(page('参数缺失', '<h1 class="err">缺少 code 或 state</h1>'));
@@ -60,10 +74,11 @@ router.get('/oauth/callback', async (req, res) => {
   }
   try {
     const info = await exchangeCodeAndStore(String(code));
-    const ret = st.returnTo && /^https?:\/\//.test(st.returnTo) ? `<p><a href="${st.returnTo}">返回</a></p>` : '';
-    res.send(page('授权成功', `<h1 class="ok">✅ 飞书授权成功</h1><p>已绑定用户 <code>${info.name || info.open_id}</code>，InkLoop 现在可以读取你的妙记转写了。</p><p>可以关闭本页。</p>${ret}`));
-  } catch (e) {
-    res.status(502).send(page('换取令牌失败', `<h1 class="err">换取令牌失败</h1><p>${e.message}</p><p>请重新发起授权。</p>`));
+    const returnTo = safeReturnTo(st.returnTo);
+    const ret = returnTo ? `<p><a rel="noopener noreferrer" href="${escapeHtml(returnTo)}">返回</a></p>` : '';
+    res.send(page('授权成功', `<h1 class="ok">✅ 飞书授权成功</h1><p>已绑定用户 <code>${escapeHtml(info.name || info.open_id)}</code>，InkLoop 现在可以读取你的妙记转写了。</p><p>可以关闭本页。</p>${ret}`));
+  } catch {
+    res.status(502).send(page('换取令牌失败', '<h1 class="err">换取令牌失败</h1><p>请重新发起授权。</p>'));
   }
 });
 

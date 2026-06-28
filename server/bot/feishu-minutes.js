@@ -21,22 +21,36 @@ const APP_SECRET = process.env.FEISHU_APP_SECRET;
 const REDIRECT_URI = process.env.FEISHU_REDIRECT_URI || 'https://nodeskweb.xiaobuyu.trade/api/feishu/oauth/callback';
 const AUTH_BASE = 'https://open.feishu.cn/open-apis/authen/v1/index';
 
+// ⚠️ 静默 lark SDK 内置 logger：它在请求失败时会打 config.data（刷新接口里正好含 refresh_token，
+// tenant token 失败时含 app_secret）→ 凭据泄露进日志。换 noop logger + fatal level。
+const noopLarkLogger = Object.freeze({ error() {}, warn() {}, info() {}, debug() {}, trace() {} });
+
 // 仅用于 minutes/authen API 的 HTTP client（≠ feishu.js 里那个收消息的 WSClient，互不影响）
 let _client = null;
 function client() {
   if (_client) return _client;
   if (!APP_ID || !APP_SECRET) throw new Error('FEISHU_APP_ID / FEISHU_APP_SECRET 未配置');
-  _client = new lark.Client({ appId: APP_ID, appSecret: APP_SECRET, appType: lark.AppType.SelfBuild, domain: lark.Domain.Feishu });
+  _client = new lark.Client({
+    appId: APP_ID, appSecret: APP_SECRET, appType: lark.AppType.SelfBuild, domain: lark.Domain.Feishu,
+    loggerLevel: lark.LoggerLevel.fatal, logger: noopLarkLogger,
+  });
   return _client;
 }
 
 // ── token 加解密（AES-256-GCM）──
 // key 优先用 env FEISHU_TOKEN_ENC_KEY(64 hex=32B)，否则从 APP_SECRET 派生（scrypt）
+let _encKey = null;
 function encKey() {
+  if (_encKey) return _encKey;
   const hex = process.env.FEISHU_TOKEN_ENC_KEY;
-  if (hex && /^[0-9a-fA-F]{64}$/.test(hex)) return Buffer.from(hex, 'hex');
+  if (hex) {
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error('FEISHU_TOKEN_ENC_KEY 必须是 64 位 hex（32 字节）');
+    _encKey = Buffer.from(hex, 'hex'); return _encKey;
+  }
+  // 未显式配 key：从 APP_SECRET 派生（当前生产即此路·换 key 会让已存 token 解不开需重授权）
   if (!APP_SECRET) throw new Error('无法派生 token 加密 key：APP_SECRET 缺失');
-  return crypto.scryptSync(APP_SECRET, 'inkloop-feishu-oauth-v1', 32);
+  _encKey = crypto.scryptSync(APP_SECRET, 'inkloop-feishu-oauth-v1', 32);
+  return _encKey;
 }
 function encrypt(plain) {
   const iv = crypto.randomBytes(12);
@@ -46,10 +60,13 @@ function encrypt(plain) {
   return `${iv.toString('base64')}:${tag.toString('base64')}:${ct.toString('base64')}`;
 }
 function decrypt(blob) {
-  const [ivB, tagB, ctB] = String(blob).split(':');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', encKey(), Buffer.from(ivB, 'base64'));
-  decipher.setAuthTag(Buffer.from(tagB, 'base64'));
-  return Buffer.concat([decipher.update(Buffer.from(ctB, 'base64')), decipher.final()]).toString('utf8');
+  const parts = String(blob).split(':');
+  if (parts.length !== 3 || parts.some((p) => !p)) throw new Error('token 密文格式错误');
+  const iv = Buffer.from(parts[0], 'base64'), tag = Buffer.from(parts[1], 'base64');
+  if (iv.length !== 12 || tag.length !== 16) throw new Error('token 密文格式错误');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', encKey(), iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(Buffer.from(parts[2], 'base64')), decipher.final()]).toString('utf8');
 }
 
 // ── CSRF state（内存·10min TTL；panel 单实例够用）──
@@ -127,29 +144,63 @@ function saveToken(d) {
   });
 }
 
+// 区分瞬时失败（网络/5xx·别误标失效）vs 永久失败（refresh_token 真过期/撤销·需重新授权）
+function isPermanentRefreshFailure(e, row) {
+  if (row.refresh_expires_at <= Date.now()) return true;
+  if (e?.response?.status >= 500 || ['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'ENOTFOUND'].includes(e?.code)) return false;
+  const msg = String(e?.response?.data?.msg || e?.feishuMsg || e?.message || '').toLowerCase();
+  return /refresh[_ -]?token/.test(msg) && /(invalid|expired|revoked|not found|unauthori[sz]ed)/.test(msg);
+}
+// 只在 refresh_token 仍是这一份时标失效（防覆盖已被别的刷新更新过的行）
+function markReauthRequired(row) {
+  db.prepare("UPDATE feishu_user_oauth_tokens SET reauth_required=1, updated_at=datetime('now') WHERE open_id=@open_id AND refresh_token_enc=@old_rt")
+    .run({ open_id: row.open_id, old_rt: row.refresh_token_enc });
+}
+
 // ── 刷新单个 token（rolling：写回新的 access+refresh）──
 async function refreshRow(row) {
-  const refreshToken = decrypt(row.refresh_token_enc);
   let d;
   try {
-    const res = await client().authen.refreshAccessToken.create({ data: { grant_type: 'refresh_token', refresh_token: refreshToken } });
+    const res = await client().authen.refreshAccessToken.create({ data: { grant_type: 'refresh_token', refresh_token: decrypt(row.refresh_token_enc) } });
     d = ensureOk('authen.refreshAccessToken.create', res);
   } catch (e) {
-    // refresh_token 过期/撤销 → 标记需重新授权
-    db.prepare('UPDATE feishu_user_oauth_tokens SET reauth_required=1, updated_at=datetime(\'now\') WHERE open_id=?').run(row.open_id);
-    const err = new Error(`刷新失败(需重新授权): ${e.message}`);
-    err.reauthRequired = true;
-    throw err;
+    if (!isPermanentRefreshFailure(e, row)) { const err = new Error('飞书 token 刷新暂时失败，请稍后重试'); err.code = 'REFRESH_TRANSIENT'; throw err; }
+    markReauthRequired(row);
+    const err = new Error('飞书授权已失效，需重新授权'); err.reauthRequired = true; err.code = 'REAUTH_REQUIRED'; throw err;
   }
   if (!d?.access_token) {
-    db.prepare('UPDATE feishu_user_oauth_tokens SET reauth_required=1, updated_at=datetime(\'now\') WHERE open_id=?').run(row.open_id);
-    const err = new Error('刷新返回缺 access_token（需重新授权）');
-    err.reauthRequired = true;
-    throw err;
+    markReauthRequired(row);
+    const err = new Error('刷新返回缺 access_token（需重新授权）'); err.reauthRequired = true; err.code = 'REAUTH_REQUIRED'; throw err;
   }
-  // open_id 不变；refresh 响应可能不回 open_id，补上
-  saveToken({ ...d, open_id: row.open_id, union_id: d.union_id || row.union_id, user_id: d.user_id || row.user_id, name: d.name || row.name });
+  // 条件更新：只在 refresh_token 仍是这一份且未失效时写回（防 rolling refresh 下旧响应覆盖新 token）
+  const info = db.prepare(`
+    UPDATE feishu_user_oauth_tokens SET
+      union_id=@union_id, user_id=@user_id, name=@name, scope=@scope,
+      access_token_enc=@at, refresh_token_enc=@rt,
+      access_expires_at=@aexp, refresh_expires_at=@rexp,
+      last_refresh_at=datetime('now'), reauth_required=0, updated_at=datetime('now')
+    WHERE open_id=@open_id AND refresh_token_enc=@old_rt AND reauth_required=0
+  `).run({
+    open_id: row.open_id, old_rt: row.refresh_token_enc,
+    union_id: d.union_id || row.union_id || null, user_id: d.user_id || row.user_id || null,
+    name: d.name || row.name || null, scope: d.scope || row.scope || null,
+    at: encrypt(d.access_token), rt: d.refresh_token ? encrypt(d.refresh_token) : row.refresh_token_enc,
+    aexp: Date.now() + (Number(d.expires_in) || 7200) * 1000,
+    rexp: d.refresh_expires_in ? Date.now() + Number(d.refresh_expires_in) * 1000 : row.refresh_expires_at,
+  });
+  // 没改到行（被别的刷新抢先了）→ 回读现存的新鲜 token
+  if (!info.changes) return getFreshUserAccessToken(row.open_id);
   return d.access_token;
+}
+
+// single-flight：同一 open_id 并发刷新只跑一次（懒刷新 + daemon 共用入口·防 rolling token 互相作废）
+const _refreshInflight = new Map();
+function refreshRowLocked(row) {
+  const existing = _refreshInflight.get(row.open_id);
+  if (existing) return existing;
+  const p = refreshRow(row).finally(() => _refreshInflight.delete(row.open_id));
+  _refreshInflight.set(row.open_id, p);
+  return p;
 }
 
 // ── 拿一个新鲜的 user_access_token（懒刷新：临期 5min 内先刷）──
@@ -158,8 +209,8 @@ export async function getFreshUserAccessToken(openId) {
   if (!row) { const e = new Error('该用户未授权飞书'); e.code = 'NO_TOKEN'; throw e; }
   if (row.reauth_required) { const e = new Error('该用户授权已失效，需重新授权'); e.code = 'REAUTH_REQUIRED'; throw e; }
   if (row.access_expires_at > Date.now() + 5 * 60 * 1000) return decrypt(row.access_token_enc);
-  // 临期或已过期 → 刷新
-  return refreshRow(row);
+  // 临期或已过期 → 刷新（single-flight）
+  return refreshRowLocked(row);
 }
 
 // 单 token 场景便利：返回唯一有效 token 的 open_id（InkLoop 不传 open_id 时用）
@@ -184,13 +235,17 @@ export function tokenStatus(openId) {
 }
 
 // ── Minutes API（用 user_access_token）──
-function streamToString(rs) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    rs.on('data', (c) => chunks.push(Buffer.from(c)));
-    rs.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    rs.on('error', reject);
-  });
+const MAX_TRANSCRIPT_BYTES = Number(process.env.FEISHU_TRANSCRIPT_MAX_BYTES || 10 * 1024 * 1024);
+async function streamToString(rs) {
+  const chunks = [];
+  let total = 0;
+  for await (const c of rs) {
+    const b = Buffer.isBuffer(c) ? c : Buffer.from(c);
+    total += b.length;
+    if (total > MAX_TRANSCRIPT_BYTES) { const e = new Error('transcript 超过大小限制'); e.code = 'TRANSCRIPT_TOO_LARGE'; throw e; }
+    chunks.push(b);
+  }
+  return Buffer.concat(chunks, total).toString('utf8');
 }
 
 // 把 lark/axios 抛出的错误归一化：抠出飞书 code/msg 挂到 error 上，方便上层透出
@@ -234,7 +289,7 @@ export function startTokenRefreshDaemon(intervalMs = 30 * 60 * 1000) {
       const soon = Date.now() + 60 * 60 * 1000; // 1h 内将过期的 access_token
       const rows = db.prepare('SELECT * FROM feishu_user_oauth_tokens WHERE reauth_required=0 AND access_expires_at < ? AND refresh_expires_at > ?').all(soon, Date.now());
       for (const row of rows) {
-        try { await refreshRow(row); console.log(`[feishu-oauth] 续期成功 open_id=${row.open_id}`); }
+        try { await refreshRowLocked(row); console.log(`[feishu-oauth] 续期成功 open_id=${row.open_id}`); }
         catch (e) { console.warn(`[feishu-oauth] 续期失败 open_id=${row.open_id}: ${e.message}`); }
       }
     } catch (e) { console.warn('[feishu-oauth] daemon tick 错误:', e.message); }
