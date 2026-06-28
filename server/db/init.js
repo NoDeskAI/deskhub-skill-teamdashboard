@@ -287,6 +287,39 @@ try {
   console.warn('[db] feishu_user_oauth_tokens migration warning:', e.message);
 }
 
+// --- 迁移：飞书会议 + 妙记卡片事件中枢（WS2·供 InkLoop 查 t0 + minute_token） ---
+// 会议来自 VC all_meeting_started/ended 事件（无须机器人参会）；妙记卡片来自 owner 手动转发到机器人群。
+// minute_token→meeting_id 无直达 API，靠 topic + 时间窗在查询时关联（见 bot/feishu-events.js）。
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feishu_meetings (
+      meeting_id     TEXT PRIMARY KEY,
+      meeting_no     TEXT,
+      topic          TEXT,
+      start_time     INTEGER,            -- epoch ms（录音对轴 t0 近似）
+      end_time       INTEGER,            -- epoch ms
+      owner_open_id  TEXT,
+      group_ids      TEXT,               -- JSON array
+      created_at     TEXT DEFAULT (datetime('now')),
+      updated_at     TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_meetings_start ON feishu_meetings(start_time)');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feishu_minute_cards (
+      minute_token   TEXT PRIMARY KEY,
+      minute_url     TEXT,
+      topic          TEXT,
+      chat_id        TEXT,               -- 卡片所在群
+      received_at    INTEGER,            -- epoch ms（卡片到达时刻）
+      created_at     TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_minute_cards_recv ON feishu_minute_cards(received_at)');
+} catch (e) {
+  console.warn('[db] feishu_meetings/minute_cards migration warning:', e.message);
+}
+
 console.log(`[db] SQLite ready at ${DB_PATH}`);
 
 export default db;

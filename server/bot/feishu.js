@@ -6,6 +6,7 @@
 
 import * as lark from '@larksuiteoapi/node-sdk';
 import crypto from 'crypto';
+import { recordMeetingStarted, recordMeetingEnded, recordMinuteCardFromMessage } from './feishu-events.js';
 
 let client = null;
 let botOpenId = null;
@@ -81,10 +82,11 @@ export async function initFeishu(onMessage) {
   // 事件处理器
   const eventDispatcher = new lark.EventDispatcher({}).register({
     'im.message.receive_v1': async (data) => {
-      // —— WS2 临时探针：非 text 消息（妙记卡片等 interactive）全量 log；用完移除 ——
-      const _mt = data?.message?.message_type;
-      if (_mt && _mt !== 'text') {
-        console.log('[InkLoop-WS2/ImEvent]', _mt, JSON.stringify(data, null, 2));
+      // WS2：interactive 妙记卡片（owner 转发到机器人群）→ 提 minute_token 落库
+      const msg = data?.message;
+      if (msg?.message_type === 'interactive') {
+        const got = recordMinuteCardFromMessage(msg);
+        if (got) console.log(`[Bot/Feishu] WS2 收录妙记卡片 minute_token=${got.minuteToken} topic=${got.topic || ''}`);
       }
       try {
         await handleMessageEvent(data, onMessage);
@@ -92,56 +94,18 @@ export async function initFeishu(onMessage) {
         console.error('[Bot/Feishu] 消息处理错误:', err);
       }
     },
-    // —— WS2 临时探针：vc 会议事件全量 log；用完移除 ——
-    'vc.meeting.recording_started_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] recording_started_v1', JSON.stringify(data, null, 2));
+    // WS2：租户内全部会议（无须机器人参会即触发，对应 vc:meeting.all_meeting:readonly）→ 落库供 InkLoop 对轴
+    'vc.meeting.all_meeting_started_v1': (data) => {
+      recordMeetingStarted(data);
+      console.log(`[Bot/Feishu] WS2 会议开始 id=${data?.meeting?.id} topic=${data?.meeting?.topic || ''}`);
     },
-    'vc.meeting.recording_ready_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] recording_ready_v1', JSON.stringify(data, null, 2));
+    'vc.meeting.all_meeting_ended_v1': (data) => {
+      recordMeetingEnded(data);
+      console.log(`[Bot/Feishu] WS2 会议结束 id=${data?.meeting?.id}`);
     },
-    'vc.meeting.recording_ended_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] recording_ended_v1', JSON.stringify(data, null, 2));
-    },
-    'vc.meeting.meeting_started_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] meeting_started_v1', JSON.stringify(data, null, 2));
-    },
-    'vc.meeting.meeting_ended_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] meeting_ended_v1', JSON.stringify(data, null, 2));
-    },
-    // —— WS2 临时探针：租户内全部会议（无须机器人参会即可触发，对应 vc:meeting.all_meeting:readonly） ——
-    'vc.meeting.all_meeting_started_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] all_meeting_started_v1', JSON.stringify(data, null, 2));
-      // —— WS2 实验 A：白名单群里的会议立刻调 POST /vc/v1/bots/join 让机器人入会 ——
-      // 端点来自 lark-cli 源码（larksuite/cli VCMeetingJoin）：scope=vc:meeting.bot.join:write，
-      // AuthTypes 包含 bot，所以 tenant_access_token 应可调；lark SDK 没生成 wrapper，用 client.request 手动调。
-      // 字段名 lark-cli 源码暗示是 meeting_number（命令 hint "Join by meeting number"），同时附 meeting_id 兜底。
-      const TEST_GROUP_CHAT_ID = 'oc_94ec4b9a9c42bc7d104676c6dc46adcd'; // 飞书会议测试群
-      const meeting = data?.meeting;
-      const groupIds = meeting?.security_setting?.group_ids || [];
-      if (!groupIds.includes(TEST_GROUP_CHAT_ID)) return;
-      const meetingNumber = meeting?.meeting_no;
-      if (!meetingNumber) { console.log('[InkLoop-WS2/BotJoin] meeting_no 缺失，跳过'); return; }
-      // lark-cli 源码 vc_meeting_join.go 确认 payload schema：
-      // { join_type: 1, join_identify: { meeting_no: "..." } }
-      const joinBody = {
-        join_type: 1,
-        join_identify: { meeting_no: meetingNumber },
-      };
-      try {
-        const res = await client.request({
-          method: 'POST',
-          url: 'https://open.feishu.cn/open-apis/vc/v1/bots/join',
-          data: joinBody,
-        });
-        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(joinBody), 'result', JSON.stringify(res, null, 2));
-      } catch (e) {
-        const body = e?.response?.data ?? e?.body ?? { message: e?.message };
-        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(joinBody), 'ERROR', JSON.stringify(body, null, 2));
-      }
-    },
-    'vc.meeting.all_meeting_ended_v1': async (data) => {
-      console.log('[InkLoop-WS2/Vc] all_meeting_ended_v1', JSON.stringify(data, null, 2));
-    },
+    // 机器人参会时才会触发的录音事件（当前未入会·留作未来 t0 精确化的挂点）
+    'vc.meeting.recording_started_v1': (data) => recordMeetingStarted(data),
+    'vc.meeting.recording_ended_v1': (data) => recordMeetingEnded(data),
   });
 
   // WSClient 长连接（无需公网 IP）

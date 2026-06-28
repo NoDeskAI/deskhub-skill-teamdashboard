@@ -18,6 +18,7 @@ import {
   buildAuthorizeUrl, consumeState, exchangeCodeAndStore,
   getMinute, getTranscript, tokenStatus, listAuthorized, soleAuthorizedOpenId,
 } from '../bot/feishu-minutes.js';
+import { recentMeetings, getMeeting } from '../bot/feishu-events.js';
 
 const router = Router();
 const SHARED_SECRET = process.env.INKLOOP_SHARED_SECRET || '';
@@ -71,6 +72,22 @@ router.get('/oauth/status', requireInkloopSecret, (req, res) => {
   try {
     if (req.query.open_id) return res.json(tokenStatus(String(req.query.open_id)));
     res.json({ users: listAuthorized() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── InkLoop：最近会议（带 t0 start_time + 关联的 minute_token，供端内对轴）──
+router.get('/meetings/recent', requireInkloopSecret, (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+    res.json({ meetings: recentMeetings(limit) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/meetings/:meeting_id', requireInkloopSecret, (req, res) => {
+  try {
+    const m = getMeeting(req.params.meeting_id);
+    if (!m) return res.status(404).json({ error: 'meeting not found' });
+    res.json({ meeting: m });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
