@@ -123,7 +123,7 @@ export async function initFeishu(onMessage) {
       if (!meetingNumber) { console.log('[InkLoop-WS2/BotJoin] meeting_no 缺失，跳过'); return; }
       // lark-cli 源码 vc_meeting_join.go 确认 payload schema：
       // { join_type: 1, join_identify: { meeting_no: "..." } }
-      const data = {
+      const joinBody = {
         join_type: 1,
         join_identify: { meeting_no: meetingNumber },
       };
@@ -131,12 +131,12 @@ export async function initFeishu(onMessage) {
         const res = await client.request({
           method: 'POST',
           url: 'https://open.feishu.cn/open-apis/vc/v1/bots/join',
-          data,
+          data: joinBody,
         });
-        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'result', JSON.stringify(res, null, 2));
+        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(joinBody), 'result', JSON.stringify(res, null, 2));
       } catch (e) {
         const body = e?.response?.data ?? e?.body ?? { message: e?.message };
-        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(data), 'ERROR', JSON.stringify(body, null, 2));
+        console.log('[InkLoop-WS2/BotJoin] payload=', JSON.stringify(joinBody), 'ERROR', JSON.stringify(body, null, 2));
       }
     },
     'vc.meeting.all_meeting_ended_v1': async (data) => {
