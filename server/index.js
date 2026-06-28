@@ -8,6 +8,8 @@ import workbenchRoutes from './routes/workbench.js';
 // MCP 代理暂缓：外部 DeskClaw MCP 服务（127.0.0.1:18790）未接通，删路由避免日志噪音
 // 接通外部 MCP 后把 routes/mcp.js 恢复挂载即可
 import authRoutes from './routes/auth.js';
+import feishuOauthRoutes from './routes/feishu-oauth.js';
+import { startTokenRefreshDaemon } from './bot/feishu-minutes.js';
 import mcpServer from './mcp/index.js';
 import { requireAuth } from './middleware/auth.js';
 
@@ -53,6 +55,7 @@ app.use(MCP_PATH, requireBearerAuth({ verifier: provider }), mcpServer);
 
 // --- 路由挂载 ---
 app.use('/api/auth', authRoutes);                    // 登录（公开）+ 用户管理（自带鉴权）
+app.use('/api/feishu', feishuOauthRoutes);           // 飞书 OAuth 回调（公开）+ 妙记取数（shared secret）—— 必须在 requireAuth 之前
 app.use('/api/proxy/deskhub', deskhubProxy);         // 代理不需要登录（在 requireAuth 之前）
 app.use('/api/proxy/umami', umamiProxy);
 // app.use('/api/proxy/mcp', mcpProxy);   // 外部 MCP 未接通，先注释
@@ -101,6 +104,8 @@ const server = app.listen(PORT, () => {
   console.log(`[server] MCP endpoint: http://localhost:${PORT}${MCP_PATH}`);
   console.log(`[server] OAuth issuer: ${issuerUrl.href}`);
   startBot().catch(err => console.error('[Bot] 启动失败:', err));
+  try { startTokenRefreshDaemon(); console.log('[feishu-oauth] token 续期 daemon 已启动'); }
+  catch (e) { console.warn('[feishu-oauth] 续期 daemon 启动失败:', e.message); }
 });
 
 // --- Graceful shutdown ---

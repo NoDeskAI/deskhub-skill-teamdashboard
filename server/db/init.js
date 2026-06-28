@@ -260,6 +260,33 @@ try {
   console.warn('[db] notification_hooks migration warning:', e.message);
 }
 
+// --- 迁移：飞书 user_access_token OAuth 令牌表（WS2·InkLoop 妙记对轴用） ---
+// 妙记 transcript 对象级 ACL 只认 owner 用户身份；应用 tenant_access_token 一律 403。
+// 这里存妙记 owner 用户 OAuth 授权后的 user_access_token，按需调 minutes API 代取转写。
+// token 字段密文存储（AES-256-GCM，见 bot/feishu-minutes.js）。open_id 单应用单租户唯一，作主键。
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feishu_user_oauth_tokens (
+      open_id            TEXT PRIMARY KEY,
+      union_id           TEXT,
+      user_id            TEXT,
+      name               TEXT,
+      scope              TEXT,
+      access_token_enc   TEXT NOT NULL,
+      refresh_token_enc  TEXT NOT NULL,
+      access_expires_at  INTEGER NOT NULL,   -- epoch ms
+      refresh_expires_at INTEGER NOT NULL,   -- epoch ms
+      authorized_at      TEXT DEFAULT (datetime('now')),
+      last_refresh_at    TEXT,
+      reauth_required    INTEGER NOT NULL DEFAULT 0,
+      updated_at         TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_oauth_refresh ON feishu_user_oauth_tokens(reauth_required, access_expires_at)');
+} catch (e) {
+  console.warn('[db] feishu_user_oauth_tokens migration warning:', e.message);
+}
+
 console.log(`[db] SQLite ready at ${DB_PATH}`);
 
 export default db;
