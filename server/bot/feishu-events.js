@@ -32,6 +32,67 @@ function appendMeetingEvent(type, meetingId, occurredAt) {
   } catch (e) { console.warn('[feishu-events] appendMeetingEvent:', e.message); }
 }
 
+// 妙记↔会议时间窗（与 withMatchedMinute 共用·正反向对称：卡片 received_at 落在 meeting.end_time 的 [-5min,+6h]）。
+const MINUTE_MATCH_BEFORE_MS = 5 * 60 * 1000;
+const MINUTE_MATCH_AFTER_MS = 6 * 60 * 60 * 1000;
+
+// 反查「当前确实会被 withMatchedMinute 判为匹配此 minute_token」的会议。
+// 候选集 = bound/topic/时间窗 三规则并集（粗筛），再用 withMatchedMinute 自身做权威过滤 → 不会和正向匹配漂移。
+function meetingsMatchedToMinuteToken(minuteToken) {
+  const token = String(minuteToken || '').trim();
+  if (!token) return [];
+  const card = getMinuteCard(token);
+  const rows = db.prepare(`
+    SELECT DISTINCT m.*
+    FROM feishu_meetings m
+    WHERE m.bound_minute_token = @token
+       OR (m.bound_minute_token IS NULL AND @topic IS NOT NULL AND m.topic = @topic)
+       OR (
+         m.bound_minute_token IS NULL
+         AND @receivedAt IS NOT NULL
+         AND m.end_time IS NOT NULL
+         AND @receivedAt >= m.end_time - @beforeMs
+         AND @receivedAt <= m.end_time + @afterMs
+       )
+  `).all({
+    token,
+    topic: card?.topic || null,
+    receivedAt: Number.isFinite(Number(card?.received_at)) ? Number(card.received_at) : null,
+    beforeMs: MINUTE_MATCH_BEFORE_MS,
+    afterMs: MINUTE_MATCH_AFTER_MS,
+  });
+  return rows.filter((meeting) => withMatchedMinute(meeting).minute_token === token);
+}
+
+// 某 minute_token 若已有总结 → 给指定会议补一条 summary_ready（覆盖「先总结妙记、后绑定会议」）。
+function appendSummaryReadyEventIfPresent(meetingId, minuteToken, fallbackOccurredAt) {
+  try {
+    if (!meetingId || !minuteToken) return;
+    const row = db.prepare('SELECT generated_at FROM feishu_meeting_summaries WHERE minute_token=?').get(minuteToken);
+    if (row) appendMeetingEvent('summary_ready', meetingId, row.generated_at || fallbackOccurredAt);
+  } catch (e) { console.warn('[feishu-events] appendSummaryReadyEventIfPresent:', e.message); }
+}
+
+// 卡片到来 → 对「当前匹配此卡片 token」的会议发 minute_bound（显式绑定的会议由 bindMinuteToMeeting 自己发，跳过）。
+function appendMinuteBoundEventsForCard(minuteToken, occurredAt) {
+  try {
+    for (const meeting of meetingsMatchedToMinuteToken(minuteToken)) {
+      if (meeting.bound_minute_token) continue;
+      appendMeetingEvent('minute_bound', meeting.meeting_id, occurredAt);
+      appendSummaryReadyEventIfPresent(meeting.meeting_id, minuteToken, occurredAt);
+    }
+  } catch (e) { console.warn('[feishu-events] appendMinuteBoundEventsForCard:', e.message); }
+}
+
+// 总结生成 → 对所有匹配此 token 的会议发 summary_ready。
+function appendSummaryReadyEventsForMinute(minuteToken, generatedAt) {
+  try {
+    for (const meeting of meetingsMatchedToMinuteToken(minuteToken)) {
+      appendMeetingEvent('summary_ready', meeting.meeting_id, generatedAt);
+    }
+  } catch (e) { console.warn('[feishu-events] appendSummaryReadyEventsForMinute:', e.message); }
+}
+
 // ── 会议落库 ──
 export function recordMeetingStarted(ev) {
   const m = ev?.meeting;
@@ -89,6 +150,7 @@ export function recordMinuteCardFromMessage(message) {
     // 标题：卡片里常见「主题：XXX」
     const mTopic = raw.match(/主题[：:]\s*([^"\\\n]+?)["\\]/) || raw.match(/主题[：:]\s*([^"\\\n]+)/);
     const topic = mTopic ? mTopic[1].trim() : null;
+    const receivedAt = toMs(message.create_time) || Date.now();
     db.prepare(`
       INSERT INTO feishu_minute_cards (minute_token, minute_url, topic, chat_id, received_at)
       VALUES (@token, @url, @topic, @chat, @recv)
@@ -97,8 +159,11 @@ export function recordMinuteCardFromMessage(message) {
     `).run({
       token: minuteToken, url: minuteUrl, topic,
       chat: message.chat_id || null,
-      recv: toMs(message.create_time) || Date.now(),
+      recv: receivedAt,
     });
+    // 卡片落库后，对当前匹配此 token 的会议补发 minute_bound（occurred_at 用库里 received_at·重放幂等）。
+    const card = getMinuteCard(minuteToken);
+    appendMinuteBoundEventsForCard(minuteToken, card?.received_at || receivedAt);
     return { minuteToken, topic };
   } catch (e) { console.warn('[feishu-events] recordMinuteCard:', e.message); return null; }
 }
@@ -153,6 +218,11 @@ export function activeMeetings(limit = 20) {
 export function upsertMeetingSummary(result, { model, generatedByOpenId = '' } = {}) {
   if (!result?.minuteToken) { console.warn('[feishu-events] upsertMeetingSummary: 缺 minuteToken，跳过落库'); return; }
   try {
+    const summaryJson = JSON.stringify(result.summary);
+    const usageJson = JSON.stringify(result.usage || {});
+    const generatedAt = Date.now();
+    const prev = db.prepare('SELECT summary_json FROM feishu_meeting_summaries WHERE minute_token=?').get(result.minuteToken);
+    const summaryChanged = !prev || prev.summary_json !== summaryJson;
     db.prepare(`
       INSERT INTO feishu_meeting_summaries
         (minute_token, meeting_id, topic, summary_json, model, usage_json, generated_at, generated_by_open_id)
@@ -166,19 +236,26 @@ export function upsertMeetingSummary(result, { model, generatedByOpenId = '' } =
       minuteToken: result.minuteToken,
       meetingId: result.meetingId || null,
       topic: result.topic || '',
-      summary: JSON.stringify(result.summary),
+      summary: summaryJson,
       model: model || 'unknown',
-      usage: JSON.stringify(result.usage || {}),
-      at: Date.now(),
+      usage: usageJson,
+      at: generatedAt,
       by: generatedByOpenId || '',
     });
+    // 总结内容真变（首次或重生成出不同结果）才 emit；force regenerate 出同样内容不打扰设备。
+    if (summaryChanged) appendSummaryReadyEventsForMinute(result.minuteToken, generatedAt);
   } catch (e) { console.warn('[feishu-events] upsertMeetingSummary:', e.message); }
 }
 
-// 取某会议的总结：meeting_id → minute_token → summary。status: not_found / missing_minute / not_generated / ready。
+// 取某会议的总结。status: not_found / missing_minute / not_generated / ready。
+// 先按 meeting_id 直查（总结落库时存了 meeting_id）——不依赖 minute_token 的 heuristic 重新匹配，
+// 防「妙记匹配后来漂移（又来张同 topic 新卡片）→ 设备拉不到原总结」。命中即 ready；否则回退 minute_token。
 export function getMeetingSummaryForMeeting(meetingId) {
   const meeting = getMeeting(meetingId);
   if (!meeting) return { status: 'not_found', meeting: null, summary: null };
+  const byMeeting = db.prepare('SELECT * FROM feishu_meeting_summaries WHERE meeting_id=? ORDER BY generated_at DESC LIMIT 1').get(meetingId);
+  if (byMeeting) return { status: 'ready', meeting, summary: { ...byMeeting, summary: JSON.parse(byMeeting.summary_json) } };
+  // 回退：按当前匹配的 minute_token 查（覆盖 meeting_id 列为 null 的旧总结 / 直查未命中）。
   if (!meeting.minute_token) return { status: 'missing_minute', meeting, summary: null };
   const row = db.prepare('SELECT * FROM feishu_meeting_summaries WHERE minute_token=?').get(meeting.minute_token);
   return {
@@ -201,8 +278,10 @@ export function getMinuteCard(minuteToken) {
 export function bindMinuteToMeeting(meetingId, minuteToken, { matchedBy = 'inkloop_confirmation', boundBy = 'inkloop' } = {}) {
   const token = String(minuteToken || '').trim();
   if (!/^[A-Za-z0-9_-]+$/.test(token)) { const e = new Error('invalid minute_token'); e.code = 'INVALID_MINUTE_TOKEN'; throw e; }
-  const row = db.prepare('SELECT meeting_id FROM feishu_meetings WHERE meeting_id=?').get(meetingId);
+  const row = db.prepare('SELECT meeting_id, bound_minute_token FROM feishu_meetings WHERE meeting_id=?').get(meetingId);
   if (!row) return null;
+  if (row.bound_minute_token === token) return getMeeting(meetingId); // 同 token 重复绑定：不刷新 bound_at、不重复发事件。
+  const boundAt = Date.now();
   db.prepare(`
     UPDATE feishu_meetings
     SET bound_minute_token=@token, bound_minute_source=@matchedBy, bound_minute_by=@boundBy,
@@ -212,8 +291,10 @@ export function bindMinuteToMeeting(meetingId, minuteToken, { matchedBy = 'inklo
     meetingId, token,
     matchedBy: String(matchedBy || 'inkloop_confirmation').slice(0, 64),
     boundBy: String(boundBy || 'inkloop').slice(0, 128),
-    boundAt: Date.now(),
+    boundAt,
   });
+  appendMeetingEvent('minute_bound', meetingId, boundAt);
+  appendSummaryReadyEventIfPresent(meetingId, token, boundAt); // 若该 token 已先有总结，补发 summary_ready。
   return getMeeting(meetingId);
 }
 
@@ -235,7 +316,7 @@ function withMatchedMinute(meeting) {
   }
   if (!card && meeting.end_time) {
     card = db.prepare('SELECT * FROM feishu_minute_cards WHERE received_at >= ? AND received_at <= ? ORDER BY received_at ASC LIMIT 1')
-      .get(meeting.end_time - 5 * 60 * 1000, meeting.end_time + 6 * 60 * 60 * 1000);
+      .get(meeting.end_time - MINUTE_MATCH_BEFORE_MS, meeting.end_time + MINUTE_MATCH_AFTER_MS);
     if (card) match = { minute_token: card.minute_token, confidence: 'heuristic', source: 'time_window', matched_by: 'end_time_window_low' };
   }
   return serializeMeeting(meeting, card, match);

@@ -327,13 +327,13 @@ try {
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_minute_cards_recv ON feishu_minute_cards(received_at)');
-  // 可重放增量事件游标（L1·供 InkLoop 设备 GET /meetings/events?since=<seq> 拉「会议开始/结束」）。
+  // 可重放增量事件游标（L1+L5·供 InkLoop 设备 GET /meetings/events?since=<seq> 拉会议状态变化）。
   // 设备可能休眠/离线/无公网 → 不推送(webhook/SSE)，改设备增量轮询；seq 自增做游标。
-  // UNIQUE(type,meeting_id)：一个会议 started/ended 各一条，事件重放 ON CONFLICT 更新 occurred_at（幂等）。
+  // UNIQUE(type,meeting_id,occurred_at)：同会议同 type 同时刻只一条；时间/状态变化追加新 seq → 设备增量可感知。
   db.exec(`
     CREATE TABLE IF NOT EXISTS feishu_meeting_events (
       seq         INTEGER PRIMARY KEY AUTOINCREMENT,
-      type        TEXT NOT NULL,          -- started | ended
+      type        TEXT NOT NULL,          -- started | ended | minute_bound | summary_ready
       meeting_id  TEXT NOT NULL,
       occurred_at INTEGER NOT NULL,        -- start_time / end_time，epoch ms
       created_at  INTEGER NOT NULL         -- 落库时刻，epoch ms
