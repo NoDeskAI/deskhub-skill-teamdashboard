@@ -15,6 +15,23 @@ function toMs(v) {
   return n < 1e12 ? Math.round(n * 1000) : Math.round(n);
 }
 
+// 追加可重放事件（L1·游标 seq 自增；同 (type,meeting_id) 幂等更新 occurred_at）。
+// occurred_at NOT NULL → toMs 可能为 null（事件没带 start/end）时用落库时刻兜底。
+function appendMeetingEvent(type, meetingId, occurredAt) {
+  try {
+    const at = Number.isFinite(Number(occurredAt)) ? Math.round(Number(occurredAt)) : null;
+    // 同一 (type,meeting_id) 时间没变 → 不重复追加（去重）；时间变（会议重开 started / 补正 start_time）→ 追加新 seq 让设备增量感知。
+    const last = db.prepare('SELECT occurred_at FROM feishu_meeting_events WHERE type=? AND meeting_id=? ORDER BY seq DESC LIMIT 1').get(type, meetingId);
+    if (last && (at == null || last.occurred_at === at)) return;
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO feishu_meeting_events (type, meeting_id, occurred_at, created_at)
+      VALUES (@type, @meetingId, @occurredAt, @now)
+      ON CONFLICT(type, meeting_id, occurred_at) DO NOTHING
+    `).run({ type, meetingId, occurredAt: at ?? now, now });
+  } catch (e) { console.warn('[feishu-events] appendMeetingEvent:', e.message); }
+}
+
 // ── 会议落库 ──
 export function recordMeetingStarted(ev) {
   const m = ev?.meeting;
@@ -24,7 +41,7 @@ export function recordMeetingStarted(ev) {
       INSERT INTO feishu_meetings (meeting_id, meeting_no, topic, start_time, end_time, owner_open_id, group_ids, updated_at)
       VALUES (@id, @no, @topic, @start, @end, @owner, @groups, datetime('now'))
       ON CONFLICT(meeting_id) DO UPDATE SET
-        meeting_no=@no, topic=@topic, start_time=COALESCE(@start, start_time),
+        meeting_no=COALESCE(@no, meeting_no), topic=COALESCE(@topic, topic), start_time=COALESCE(@start, start_time),
         owner_open_id=COALESCE(@owner, owner_open_id), group_ids=COALESCE(@groups, group_ids),
         updated_at=datetime('now')
     `).run({
@@ -33,6 +50,7 @@ export function recordMeetingStarted(ev) {
       owner: m.owner?.id?.open_id || m.host_user?.id?.open_id || null,
       groups: m.security_setting?.group_ids ? JSON.stringify(m.security_setting.group_ids) : null,
     });
+    appendMeetingEvent('started', m.id, toMs(m.start_time));
   } catch (e) { console.warn('[feishu-events] recordMeetingStarted:', e.message); }
 }
 
@@ -54,6 +72,7 @@ export function recordMeetingEnded(ev) {
       owner: m.owner?.id?.open_id || m.host_user?.id?.open_id || null,
       groups: m.security_setting?.group_ids ? JSON.stringify(m.security_setting.group_ids) : null,
     });
+    appendMeetingEvent('ended', m.id, toMs(m.end_time));
   } catch (e) { console.warn('[feishu-events] recordMeetingEnded:', e.message); }
 }
 
@@ -93,6 +112,80 @@ export function recentMeetings(limit = 20) {
 export function getMeeting(meetingId) {
   const row = db.prepare('SELECT * FROM feishu_meetings WHERE meeting_id=?').get(meetingId);
   return row ? withMatchedMinute(row) : null;
+}
+
+// L1：增量事件流（设备 GET /meetings/events?since=<seq>）。每条 event 内嵌完整会议（带 match）。
+export function meetingEventsSince(since = 0, limit = 100) {
+  const rows = db.prepare(`
+    SELECT e.seq, e.type AS event_type, e.occurred_at AS event_occurred_at,
+           e.created_at AS event_created_at, m.*
+    FROM feishu_meeting_events e
+    JOIN feishu_meetings m ON m.meeting_id = e.meeting_id
+    WHERE e.seq > @since
+    ORDER BY e.seq ASC
+    LIMIT @limit
+  `).all({ since, limit });
+  return {
+    cursor: rows.at(-1)?.seq ?? since,
+    events: rows.map(({ seq, event_type, event_occurred_at, event_created_at, ...meeting }) => ({
+      seq,
+      type: event_type,
+      occurred_at: event_occurred_at,
+      created_at: event_created_at,
+      meeting: withMatchedMinute(meeting),
+    })),
+  };
+}
+
+// L1：当前进行中的会议快照（设备无 cursor / 迟到打开时补 active）。end_time 仍空且 12h 内开始。
+export function activeMeetings(limit = 20) {
+  const floor = Date.now() - 12 * 60 * 60 * 1000;
+  return db.prepare(`
+    SELECT * FROM feishu_meetings
+    WHERE start_time IS NOT NULL AND start_time >= ? AND end_time IS NULL
+    ORDER BY start_time DESC
+    LIMIT ?
+  `).all(floor, limit).map(withMatchedMinute);
+}
+
+// ── L5：会议五要素总结落库 / 取数（供设备会后 recap 显示「会议讲了什么」）──
+// 按 minute_token 主键（总结绑定妙记转写）；result 来自 meeting-workflow.summarizeMeeting：{ minuteToken, meetingId, topic, summary, usage }。
+export function upsertMeetingSummary(result, { model, generatedByOpenId = '' } = {}) {
+  if (!result?.minuteToken) { console.warn('[feishu-events] upsertMeetingSummary: 缺 minuteToken，跳过落库'); return; }
+  try {
+    db.prepare(`
+      INSERT INTO feishu_meeting_summaries
+        (minute_token, meeting_id, topic, summary_json, model, usage_json, generated_at, generated_by_open_id)
+      VALUES (@minuteToken, @meetingId, @topic, @summary, @model, @usage, @at, @by)
+      ON CONFLICT(minute_token) DO UPDATE SET
+        meeting_id=COALESCE(@meetingId, meeting_id),
+        topic=COALESCE(NULLIF(@topic, ''), topic),
+        summary_json=@summary, model=@model, usage_json=@usage,
+        generated_at=@at, generated_by_open_id=@by, updated_at=datetime('now')
+    `).run({
+      minuteToken: result.minuteToken,
+      meetingId: result.meetingId || null,
+      topic: result.topic || '',
+      summary: JSON.stringify(result.summary),
+      model: model || 'unknown',
+      usage: JSON.stringify(result.usage || {}),
+      at: Date.now(),
+      by: generatedByOpenId || '',
+    });
+  } catch (e) { console.warn('[feishu-events] upsertMeetingSummary:', e.message); }
+}
+
+// 取某会议的总结：meeting_id → minute_token → summary。status: not_found / missing_minute / not_generated / ready。
+export function getMeetingSummaryForMeeting(meetingId) {
+  const meeting = getMeeting(meetingId);
+  if (!meeting) return { status: 'not_found', meeting: null, summary: null };
+  if (!meeting.minute_token) return { status: 'missing_minute', meeting, summary: null };
+  const row = db.prepare('SELECT * FROM feishu_meeting_summaries WHERE minute_token=?').get(meeting.minute_token);
+  return {
+    status: row ? 'ready' : 'not_generated',
+    meeting,
+    summary: row ? { ...row, summary: JSON.parse(row.summary_json) } : null,
+  };
 }
 
 export function recentMinuteCards(limit = 20) {

@@ -18,7 +18,8 @@ import {
   buildAuthorizeUrl, consumeState, exchangeCodeAndStore,
   getMinute, getTranscript, tokenStatus, listAuthorized, soleAuthorizedOpenId,
 } from '../bot/feishu-minutes.js';
-import { recentMeetings, getMeeting, bindMinuteToMeeting } from '../bot/feishu-events.js';
+import { recentMeetings, getMeeting, bindMinuteToMeeting, meetingEventsSince, activeMeetings, getMeetingSummaryForMeeting } from '../bot/feishu-events.js';
+import { summarizeAndPersistMeeting } from '../bot/meeting-workflow.js';
 
 const router = Router();
 
@@ -98,6 +99,23 @@ router.get('/meetings/recent', requireInkloopSecret, (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── InkLoop L1：增量事件流（设备增量轮询·since=游标 seq）+ 进行中会议快照 ──
+//    ⚠️ 必须注册在 /meetings/:meeting_id 之前，否则 'events'/'active' 会被通配吃成 meeting_id。
+router.get('/meetings/events', requireInkloopSecret, (req, res) => {
+  try {
+    const since = Math.max(0, Number(req.query.since) || 0);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    res.json({ server_time: Date.now(), ...meetingEventsSince(since, limit) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/meetings/active', requireInkloopSecret, (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+    res.json({ server_time: Date.now(), meetings: activeMeetings(limit) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/meetings/:meeting_id', requireInkloopSecret, (req, res) => {
   try {
     const m = getMeeting(req.params.meeting_id);
@@ -117,6 +135,37 @@ router.post('/meetings/:meeting_id/bind-minute', requireInkloopSecret, (req, res
     res.json({ meeting: m });
   } catch (e) {
     res.status(e.code === 'INVALID_MINUTE_TOKEN' ? 400 : 500).json({ error: e.message });
+  }
+});
+
+// ── InkLoop L5：会议五要素总结（GET 拉已生成 / POST 触发生成并落库）──
+router.get('/meetings/:meeting_id/summary', requireInkloopSecret, (req, res) => {
+  try {
+    const out = getMeetingSummaryForMeeting(req.params.meeting_id);
+    // not_found 用 200（设备 getJson 把 404 当异常·会让前端声明的 'not_found' 态不可达）
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 同会议并发生成去重（in-flight）：多设备/连点只烧一次模型。
+const summaryJobs = new Map();
+router.post('/meetings/:meeting_id/summary', requireInkloopSecret, async (req, res) => {
+  const meetingId = req.params.meeting_id;
+  try {
+    const cached = getMeetingSummaryForMeeting(meetingId);
+    if (cached.status === 'not_found') return res.json(cached);                     // 200·非异常（前端可显示 not_found 态）
+    if (cached.status === 'missing_minute') return res.status(409).json(cached);   // 没关联妙记 → 没法总结
+    if (cached.status === 'ready' && !req.body?.force) return res.json({ ...cached, cached: true });
+    if (!summaryJobs.has(meetingId)) {
+      summaryJobs.set(meetingId, summarizeAndPersistMeeting({
+        meetingId,
+        requesterOpenId: resolveOpenId(req) || cached.meeting.owner_open_id || undefined,
+      }).finally(() => summaryJobs.delete(meetingId)));
+    }
+    await summaryJobs.get(meetingId);
+    res.json({ ...getMeetingSummaryForMeeting(meetingId), cached: false });
+  } catch (e) {
+    res.status(502).json({ status: 'failed', error: e.message });
   }
 });
 

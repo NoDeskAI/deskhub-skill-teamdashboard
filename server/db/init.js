@@ -327,6 +327,38 @@ try {
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_minute_cards_recv ON feishu_minute_cards(received_at)');
+  // 可重放增量事件游标（L1·供 InkLoop 设备 GET /meetings/events?since=<seq> 拉「会议开始/结束」）。
+  // 设备可能休眠/离线/无公网 → 不推送(webhook/SSE)，改设备增量轮询；seq 自增做游标。
+  // UNIQUE(type,meeting_id)：一个会议 started/ended 各一条，事件重放 ON CONFLICT 更新 occurred_at（幂等）。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feishu_meeting_events (
+      seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+      type        TEXT NOT NULL,          -- started | ended
+      meeting_id  TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL,        -- start_time / end_time，epoch ms
+      created_at  INTEGER NOT NULL         -- 落库时刻，epoch ms
+    )
+  `);
+  db.exec('DROP INDEX IF EXISTS idx_fme_once');
+  // UNIQUE(type,meeting_id,occurred_at)：同会议同 type 同时刻只一条（去重）；时间变化（重开/补正）追加新 seq → 设备增量可感知。
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_fme_once_at ON feishu_meeting_events(type, meeting_id, occurred_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fme_seq ON feishu_meeting_events(seq)');
+  // 会议五要素总结落库（L5·按 minute_token 主键——总结绑定妙记转写，比会议启发式匹配更稳）。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feishu_meeting_summaries (
+      minute_token         TEXT PRIMARY KEY,
+      meeting_id           TEXT,
+      topic                TEXT DEFAULT '',
+      summary_json         TEXT NOT NULL,       -- 五要素 JSON（conclusions/action_items/risks/open_questions/next_steps）
+      model                TEXT NOT NULL,
+      usage_json           TEXT DEFAULT '{}',
+      generated_at         INTEGER NOT NULL,    -- epoch ms
+      generated_by_open_id TEXT DEFAULT '',
+      created_at           TEXT DEFAULT (datetime('now')),
+      updated_at           TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_fms_meeting ON feishu_meeting_summaries(meeting_id)');
 } catch (e) {
   console.warn('[db] feishu_meetings/minute_cards migration warning:', e.message);
 }

@@ -6,7 +6,7 @@
  * 触发：① IM 命令「总结会议 X / 总结最近会议」(index.js handleMessage) ② 会议结束自动(默认关·BOT_MEETING_SUMMARY_AUTO)。
  */
 import { client, MEETING_MODEL } from './anthropic-client.js';
-import { getMeeting, getMinuteCard, recentMeetings } from './feishu-events.js';
+import { getMeeting, getMinuteCard, recentMeetings, upsertMeetingSummary } from './feishu-events.js';
 import { getMinute, getTranscript, soleAuthorizedOpenId } from './feishu-minutes.js';
 import { createAndSendCard } from './feishu.js';
 import { buildMeetingSummaryCard } from './card-templates.js';
@@ -162,9 +162,16 @@ export async function summarizeMeeting(input) {
   return { ...source, summary: normalizeSummary(parsed), usage: res.usage };
 }
 
+/** 总结 + 落库（IM 命令、自动总结、设备 POST 三条触发都走这个，确保设备能 GET 到·L5）。 */
+export async function summarizeAndPersistMeeting(input) {
+  const result = await summarizeMeeting(input);
+  upsertMeetingSummary(result, { model: MEETING_MODEL, generatedByOpenId: input.requesterOpenId || '' });
+  return result;
+}
+
 /** 总结并发卡片到 receiveId；发送失败抛错（让调用方发错误反馈，不静默丢）。 */
 export async function summarizeAndSendMeeting({ receiveId, receiveIdType, ...input }) {
-  const result = await summarizeMeeting(input);
+  const result = await summarizeAndPersistMeeting(input);
   const card = buildMeetingSummaryCard(result.summary, result);
   if (receiveId && receiveIdType) {
     const sent = await createAndSendCard(receiveId, receiveIdType, card);
