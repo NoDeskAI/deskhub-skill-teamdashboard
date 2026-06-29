@@ -18,7 +18,7 @@ import {
   buildAuthorizeUrl, consumeState, exchangeCodeAndStore,
   getMinute, getTranscript, tokenStatus, listAuthorized, soleAuthorizedOpenId,
 } from '../bot/feishu-minutes.js';
-import { recentMeetings, getMeeting } from '../bot/feishu-events.js';
+import { recentMeetings, getMeeting, bindMinuteToMeeting } from '../bot/feishu-events.js';
 
 const router = Router();
 
@@ -104,6 +104,20 @@ router.get('/meetings/:meeting_id', requireInkloopSecret, (req, res) => {
     if (!m) return res.status(404).json({ error: 'meeting not found' });
     res.json({ meeting: m });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── InkLoop：显式绑定 minute_token 到会议（端侧确认关联后回写，覆盖 topic/时间窗启发式）──
+router.post('/meetings/:meeting_id/bind-minute', requireInkloopSecret, (req, res) => {
+  try {
+    const minuteToken = typeof req.body?.minute_token === 'string' ? req.body.minute_token.trim() : '';
+    if (!/^[A-Za-z0-9_-]+$/.test(minuteToken)) return res.status(400).json({ error: 'invalid minute_token' });
+    const boundBy = (typeof req.body?.bound_by === 'string' && req.body.bound_by.trim()) ? req.body.bound_by.trim().slice(0, 128) : 'inkloop';
+    const m = bindMinuteToMeeting(req.params.meeting_id, minuteToken, { matchedBy: 'inkloop_confirmation', boundBy });
+    if (!m) return res.status(404).json({ error: 'meeting not found' });
+    res.json({ meeting: m });
+  } catch (e) {
+    res.status(e.code === 'INVALID_MINUTE_TOKEN' ? 400 : 500).json({ error: e.message });
+  }
 });
 
 // 解析 open_id：query 优先，否则单授权用户兜底

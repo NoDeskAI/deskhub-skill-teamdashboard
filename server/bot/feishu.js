@@ -46,7 +46,8 @@ const MESSAGE_DEDUP_TTL = 60000;
  * 初始化飞书客户端并启动消息监听
  * @param {Function} onMessage - 回调: (text, chatId, userId, chatType) => Promise<void>
  */
-export async function initFeishu(onMessage) {
+export async function initFeishu(onMessage, handlers = {}) {
+  const { onMeetingEnded } = handlers || {};
   const appId = process.env.FEISHU_APP_ID;
   const appSecret = process.env.FEISHU_APP_SECRET;
 
@@ -99,9 +100,12 @@ export async function initFeishu(onMessage) {
       recordMeetingStarted(data);
       console.log(`[Bot/Feishu] WS2 会议开始 id=${data?.meeting?.id} topic=${data?.meeting?.topic || ''}`);
     },
-    'vc.meeting.all_meeting_ended_v1': (data) => {
+    'vc.meeting.all_meeting_ended_v1': async (data) => {
       recordMeetingEnded(data);
       console.log(`[Bot/Feishu] WS2 会议结束 id=${data?.meeting?.id}`);
+      if (onMeetingEnded) {
+        try { await onMeetingEnded(data); } catch (err) { console.warn('[Bot/Feishu] onMeetingEnded 错误:', err.message); }
+      }
     },
     // 机器人参会时才会触发的录音事件（当前未入会·留作未来 t0 精确化的挂点）
     'vc.meeting.recording_started_v1': (data) => recordMeetingStarted(data),

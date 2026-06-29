@@ -28,6 +28,12 @@ export const DEFAULT_MODEL = process.env.MINIMAX_MODEL || 'MiniMax-M2.7-highspee
 /** 摘要模型：生成思考折叠条标题，要求不开思考（直接输出结论） */
 export const SUMMARY_MODEL = process.env.MINIMAX_SUMMARY_MODEL || 'MiniMax-M2.7-highspeed';
 
+/**
+ * 会议总结模型：默认 MiniMax-M3（百万上下文，整场 transcript 一次读完不切片）。
+ * 若厂商 Anthropic 兼容端点的正式 model id 不同，用 MINIMAX_MEETING_MODEL 覆盖。
+ */
+export const MEETING_MODEL = process.env.MINIMAX_MEETING_MODEL || 'MiniMax-M3';
+
 /** 交错思考 beta 头（边推理边调工具，跨轮次保持思考连贯） */
 export const INTERLEAVED_THINKING_HEADERS = {
   'anthropic-beta': 'interleaved-thinking-2025-05-14',

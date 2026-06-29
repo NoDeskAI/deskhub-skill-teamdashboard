@@ -305,6 +305,17 @@ try {
     )
   `);
   db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_meetings_start ON feishu_meetings(start_time)');
+  // 显式妙记绑定（InkLoop 端确认/人工绑定后回写，覆盖 topic/时间窗启发式匹配）·幂等补列
+  const _meetingCols = db.prepare('PRAGMA table_info(feishu_meetings)').all().map((c) => c.name);
+  for (const [col, ddl] of [
+    ['bound_minute_token', 'ALTER TABLE feishu_meetings ADD COLUMN bound_minute_token TEXT'],
+    ['bound_minute_source', 'ALTER TABLE feishu_meetings ADD COLUMN bound_minute_source TEXT'],
+    ['bound_minute_by', 'ALTER TABLE feishu_meetings ADD COLUMN bound_minute_by TEXT'],
+    ['bound_minute_at', 'ALTER TABLE feishu_meetings ADD COLUMN bound_minute_at INTEGER'],
+  ]) {
+    if (!_meetingCols.includes(col)) db.exec(ddl);
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_feishu_meetings_bound_minute ON feishu_meetings(bound_minute_token)');
   db.exec(`
     CREATE TABLE IF NOT EXISTS feishu_minute_cards (
       minute_token   TEXT PRIMARY KEY,

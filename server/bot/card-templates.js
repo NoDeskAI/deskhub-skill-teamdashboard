@@ -446,3 +446,60 @@ export function buildSimpleCard(content, { level = 'info', title = BOT_NAME, sub
     },
   };
 }
+
+// LLM 产的总结文本进飞书 markdown：转义标签/表格注入向量（<>& 防 font/at/text_tag 注入 · | 防表格破坏 · 折叠换行）。
+// 不转义 * _ ` [ ]，保留正常文本可读性（这些字符在会议内容里是普通标点，转义反而满屏反斜杠）。
+function escMd(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\|/g, '\\|')
+    .replace(/\s*\n+\s*/g, ' ')
+    .trim();
+}
+
+// 会议总结卡：服务端把五要素渲染成 CardKit（不让模型产 CardKit JSON，避免坏 schema 整卡失败）
+export function buildMeetingSummaryCard(summary, meta = {}) {
+  const actions = Array.isArray(summary?.action_items) ? summary.action_items : [];
+  const risks = Array.isArray(summary?.risks) ? summary.risks : [];
+  const topic = meta.topic || '会议总结';
+  const num = (items, empty) => {
+    const arr = Array.isArray(items) ? items.filter(Boolean) : [];
+    return arr.length ? arr.map((x, i) => `${i + 1}. ${escMd(x)}`).join('\n') : `<font color='grey'>${empty}</font>`;
+  };
+  const mdCell = escMd;
+  const actionTable = actions.length
+    ? ['| 事项 | 责任人 | 期限 | 依据 |', '| --- | --- | --- | --- |',
+       ...actions.map((x) => `| ${mdCell(x.task)} | ${mdCell(x.owner || '未指定')} | ${mdCell(x.due) || '—'} | ${mdCell(x.evidence) || '—'} |`)].join('\n')
+    : "<font color='grey'>（无明确行动项）</font>";
+  const metaLine = [
+    meta.meetingId ? `\`${meta.meetingId}\`` : '',
+    meta.minuteUrl ? `[打开妙记](${meta.minuteUrl})` : '',
+  ].filter(Boolean).join('  ·  ');
+
+  return {
+    schema: '2.0',
+    config: { update_multi: true, width_mode: 'fill' },
+    header: {
+      title: { tag: 'plain_text', content: '会议总结' },
+      subtitle: { tag: 'plain_text', content: topic },
+      text_tag_list: [
+        { tag: 'text_tag', text: { tag: 'plain_text', content: `${actions.length} 行动项` }, color: actions.length ? 'orange' : 'neutral' },
+        { tag: 'text_tag', text: { tag: 'plain_text', content: `${risks.length} 风险` }, color: risks.length ? 'red' : 'neutral' },
+      ],
+      icon: { tag: 'standard_icon', token: 'calendar_outlined', color: 'blue' },
+      template: risks.length ? 'orange' : 'blue',
+    },
+    body: {
+      elements: [
+        ...(metaLine ? [{ tag: 'markdown', content: metaLine, text_size: 'notation' }] : []),
+        { tag: 'markdown', content: `**📌 结论**\n${num(summary?.conclusions, '（无明确结论）')}` },
+        { tag: 'markdown', content: `**✅ 行动项**\n${actionTable}` },
+        { tag: 'markdown', content: `**⚠️ 风险**\n${num(summary?.risks, '（无）')}` },
+        { tag: 'markdown', content: `**❓ 待决问题**\n${num(summary?.open_questions, '（无）')}` },
+        { tag: 'markdown', content: `**➡️ 后续**\n${num(summary?.next_steps, '（无）')}` },
+        { tag: 'hr' },
+        { tag: 'markdown', content: "<font color='grey'>小合 · AI 整理，仅供参考</font>", text_size: 'notation' },
+      ],
+    },
+  };
+}

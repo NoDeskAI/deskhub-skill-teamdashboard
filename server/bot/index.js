@@ -48,6 +48,7 @@ import { summarizeThinking } from './summary-model.js';
 import { MarkupStream } from './markup-parser.js';
 import { renderMarkup } from './markup-renderers.js';
 import { getUserByUsername } from '../mcp/db-ops.js';
+import { parseMeetingSummaryCommand, summarizeAndSendMeeting, summarizeMeetingEndedEvent } from './meeting-workflow.js';
 import {
   buildIconProbeCard,
   buildColorProbeCard,
@@ -78,7 +79,7 @@ export async function startBot() {
 
   startSessionCleanup();
 
-  const feishuReady = await initFeishu(handleMessage);
+  const feishuReady = await initFeishu(handleMessage, { onMeetingEnded: handleMeetingEnded });
 
   startPatrol();
   startHookScheduler();
@@ -842,6 +843,23 @@ class ChatCardStreamer {
 //  消息处理
 // ============================================================
 
+// 会议结束自动总结（默认关·BOT_MEETING_SUMMARY_AUTO=true 开；延迟等妙记卡片生成后再总结）
+const pendingMeetingSummaryTimers = new Map();
+async function handleMeetingEnded(data) {
+  if (process.env.BOT_MEETING_SUMMARY_AUTO !== 'true') return;
+  const meetingId = data?.meeting?.id;
+  if (!meetingId) return;
+  const delayMs = Number(process.env.BOT_MEETING_SUMMARY_DELAY_MS) || 10 * 60 * 1000;
+  const old = pendingMeetingSummaryTimers.get(meetingId);
+  if (old) clearTimeout(old); // 同一会议事件重投 → 只留最后一个 timer，不重复烧模型/刷卡
+  const timer = setTimeout(() => {
+    pendingMeetingSummaryTimers.delete(meetingId);
+    summarizeMeetingEndedEvent(data).catch((err) => console.warn('[Bot/MeetingSummary] auto failed:', err.message));
+  }, delayMs);
+  pendingMeetingSummaryTimers.set(meetingId, timer);
+  timer.unref?.();
+}
+
 async function handleMessage(text, chatId, userId, chatType) {
   const receiveId = chatType === 'p2p' ? userId : chatId;
   const receiveIdType = chatType === 'p2p' ? 'open_id' : 'chat_id';
@@ -898,6 +916,26 @@ async function handleMessage(text, chatId, userId, chatType) {
       await createAndSendCard(receiveId, receiveIdType,
         buildSimpleCard(`绑定失败：${result.reason}。\n\n格式：\`绑定 用户名 密码\``,
           { level: 'warn' }));
+    }
+    return;
+  }
+
+  // ── 会议总结命令（不经过 LLM）：「总结会议 <id>」/「总结妙记 <链接|token>」──
+  const meetingCmd = parseMeetingSummaryCommand(text);
+  if (meetingCmd) {
+    const { status } = await enqueueMessage(userId, async () => {
+      try {
+        await createAndSendCard(receiveId, receiveIdType,
+          buildSimpleCard('正在读取妙记转写，稍候发送会议总结…', { level: 'info', title: '会议总结' }));
+        await summarizeAndSendMeeting({ ...meetingCmd, requesterOpenId: userId, receiveId, receiveIdType });
+      } catch (err) {
+        await createAndSendCard(receiveId, receiveIdType,
+          buildSimpleCard(`会议总结失败：${err.message}`, { level: 'error', title: '会议总结' }));
+      }
+    });
+    if (status === 'backpressure') {
+      await createAndSendCard(receiveId, receiveIdType,
+        buildSimpleCard('我还在处理你之前的消息，稍等一下~', { level: 'info' }));
     }
     return;
   }
