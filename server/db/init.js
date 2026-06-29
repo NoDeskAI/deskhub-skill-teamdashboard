@@ -320,6 +320,51 @@ try {
   console.warn('[db] feishu_meetings/minute_cards migration warning:', e.message);
 }
 
+// --- InkLoop Vault Release（交付路线 Y·per-user 塑形·device 仅元数据不进 scoping）---
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS vault_blobs (
+      user_id      TEXT NOT NULL,
+      content_hash TEXT NOT NULL,        -- 'sha256:<hex>'
+      bytes        INTEGER NOT NULL,
+      disk_path    TEXT NOT NULL,        -- 相对 VAULT_RELEASE_DIR
+      created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, content_hash)  -- 按 user 分桶·堵跨用户秒传探测
+    );
+    CREATE TABLE IF NOT EXISTS vault_releases (
+      id             TEXT PRIMARY KEY,
+      user_id        TEXT NOT NULL,
+      device_id      TEXT NOT NULL DEFAULT '',  -- 来源元数据·不进 scoping
+      release_hash   TEXT NOT NULL,
+      schema_version TEXT NOT NULL,
+      app_version    TEXT NOT NULL DEFAULT '',
+      generated_at   TEXT NOT NULL DEFAULT '',
+      manifest_json  TEXT NOT NULL,
+      file_count     INTEGER NOT NULL DEFAULT 0,
+      total_bytes    INTEGER NOT NULL DEFAULT 0,
+      uploaded_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (user_id, release_hash)        -- per-user 内容指纹唯一·重发幂等
+    );
+    CREATE TABLE IF NOT EXISTS vault_release_files (
+      release_id   TEXT NOT NULL,
+      sort_order   INTEGER NOT NULL,
+      path         TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      bytes        INTEGER NOT NULL,
+      PRIMARY KEY (release_id, path),
+      FOREIGN KEY (release_id) REFERENCES vault_releases(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS vault_latest (
+      user_id     TEXT PRIMARY KEY,        -- per-user 一个 latest 指针
+      release_id  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_vault_releases_user ON vault_releases(user_id, uploaded_at);
+  `);
+} catch (e) {
+  console.warn('[db] vault_* migration warning:', e.message);
+}
+
 console.log(`[db] SQLite ready at ${DB_PATH}`);
 
 export default db;

@@ -9,6 +9,7 @@ import workbenchRoutes from './routes/workbench.js';
 // 接通外部 MCP 后把 routes/mcp.js 恢复挂载即可
 import authRoutes from './routes/auth.js';
 import feishuOauthRoutes from './routes/feishu-oauth.js';
+import inkloopVaultRoutes from './routes/inkloop-vault.js';
 import { startTokenRefreshDaemon } from './bot/feishu-minutes.js';
 import mcpServer from './mcp/index.js';
 import { requireAuth } from './middleware/auth.js';
@@ -28,6 +29,11 @@ const PORT = process.env.PORT || 3001;
 
 const corsOrigin = process.env.CORS_ORIGIN;
 app.use(cors(corsOrigin ? { origin: corsOrigin.split(',').map(s => s.trim()) } : undefined));
+
+// InkLoop vault release（交付路线 Y）：必须在全局 express.json() **之前**挂载——
+// 它自带 50mb json parser；放后面会被全局默认 ~100KB limit 先拦死大 release。shared-secret 鉴权在路由内。
+app.use('/api/inkloop/vault', inkloopVaultRoutes);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));  // OAuth 登录表单
 
