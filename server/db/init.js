@@ -357,7 +357,8 @@ try {
     CREATE TABLE IF NOT EXISTS vault_latest (
       user_id     TEXT PRIMARY KEY,        -- per-user 一个 latest 指针
       release_id  TEXT NOT NULL,
-      updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (release_id) REFERENCES vault_releases(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_vault_releases_user ON vault_releases(user_id, uploaded_at);
   `);

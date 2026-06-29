@@ -14,7 +14,7 @@ import { Router } from 'express';
 import express from 'express';
 import crypto from 'crypto';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync } from 'fs';
-import { dirname, join, resolve } from 'path';
+import { dirname, isAbsolute, join, relative, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import db from '../db/init.js';
 import { requireInkloopSecret } from '../middleware/inkloop-secret.js';
@@ -22,10 +22,19 @@ import { requireInkloopSecret } from '../middleware/inkloop-secret.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VAULT_DIR = resolve(process.env.VAULT_RELEASE_DIR || join(__dirname, '..', 'vault-releases')); // 非公开（不在 /api/uploads static 树下）
 const RELEASE_SCHEMA = 'inkloop.vault_release.v1';
+const RELEASE_HASH_RE = /^(?:sha256:)?[a-f0-9]{64}$/;
+const MAX_FILES = Math.max(1, Number.parseInt(process.env.VAULT_RELEASE_MAX_FILES || '2000', 10) || 2000);
+const MAX_PATH_BYTES = Math.max(64, Number.parseInt(process.env.VAULT_RELEASE_MAX_PATH_BYTES || '1024', 10) || 1024);
 
 const router = Router();
 router.use(requireInkloopSecret);
 router.use(express.json({ limit: process.env.VAULT_RELEASE_BODY_LIMIT || '50mb' }));
+// 坏 JSON / 超限 → 明确 400/413（否则落全局兜底返 500·状态码错）
+router.use((err, _req, res, next) => {
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'release payload too large' });
+  if (err?.type === 'entity.parse.failed' || err instanceof SyntaxError) return res.status(400).json({ error: 'invalid JSON' });
+  next(err);
+});
 
 // userId/deviceId 进路径/磁盘路径 → 严格白名单（防路径逃逸/注入）
 const sanId = (s) => (typeof s === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(s) ? s : null);
@@ -35,27 +44,48 @@ function validateVaultPath(p) {
   if (typeof p !== 'string' || !p) return 'empty';
   if (!p.startsWith('InkLoop/')) return 'not under InkLoop/';
   if (p.includes('\\') || p.includes('\0')) return 'illegal char';
+  if (Buffer.byteLength(p, 'utf8') > MAX_PATH_BYTES) return 'too long';
   if (p.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) return 'illegal segment';
   return null;
 }
 
 const sha256Hex = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 
-// 原子写 blob（内容寻址·已存在跳过）：tmp → fsync → rename。返回相对 VAULT_DIR 的 disk_path。
+// release_hash 服务端复算（**必须与 InkLoop 侧 buildVaultRelease 同口径**：按 path 排序的 `<path> <content_hash>` 换行串求 sha256）。
+// 不复算就等于信客户端任意串——同 hash 不同内容会被静默当旧 release。
+function computeReleaseHash(prepared) {
+  const lines = [...prepared].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((f) => `${f.path} ${f.content_hash}`);
+  return `sha256:${sha256Hex(lines.join('\n'))}`;
+}
+function normalizeReleaseHash(h) {
+  if (typeof h !== 'string' || !RELEASE_HASH_RE.test(h)) return null;
+  return h.startsWith('sha256:') ? h : `sha256:${h}`;
+}
+function isReleaseHashConflict(e) {
+  return String(e?.message || '').includes('UNIQUE constraint failed') && String(e?.message || '').includes('vault_releases');
+}
+function fsyncDir(dir) {
+  let fd;
+  try { fd = openSync(dir, 'r'); fsyncSync(fd); } catch (e) { if (process.platform !== 'win32') throw e; } finally { if (fd !== undefined) closeSync(fd); }
+}
+
+// 原子写 blob（内容寻址·已存在跳过）：tmp → fsync(file) → rename → fsync(dir)。返回相对 VAULT_DIR 的 disk_path。
 function writeBlobAtomic(userId, hex, markdown) {
   const rel = join(userId, 'sha256', hex.slice(0, 2), `${hex}.md`);
   const abs = join(VAULT_DIR, rel);
   if (existsSync(abs)) return rel; // 同 hash=同内容·信内容寻址
-  mkdirSync(dirname(abs), { recursive: true });
+  const dir = dirname(abs);
+  mkdirSync(dir, { recursive: true });
   const tmp = `${abs}.tmp-${crypto.randomBytes(6).toString('hex')}`;
   const fd = openSync(tmp, 'w');
   try {
     writeSync(fd, markdown, null, 'utf8');
-    fsyncSync(fd); // 落盘后再 rename·防半截（崩溃一致性）
+    fsyncSync(fd); // 落盘后再 rename·防半截
   } finally {
     closeSync(fd);
   }
   renameSync(tmp, abs);
+  fsyncDir(dir); // 目录项也落盘·防"DB 已提交但目录没持久化"（断电一致性）
   return rel;
 }
 
@@ -64,21 +94,21 @@ router.post('/users/:userId/releases', (req, res) => {
   const userId = sanId(req.params.userId);
   if (!userId) return res.status(400).json({ error: 'bad userId' });
   const { manifest, files, device_id } = req.body || {};
-  const deviceId = sanId(device_id) || ''; // 仅元数据
-
-  if (!manifest || manifest.schema_version !== RELEASE_SCHEMA) return res.status(400).json({ error: `schema_version != ${RELEASE_SCHEMA}` });
-  if (typeof manifest.release_hash !== 'string' || !manifest.release_hash) return res.status(400).json({ error: 'missing release_hash' });
-  if (!Array.isArray(manifest.files) || !Array.isArray(files) || manifest.files.length !== files.length) return res.status(400).json({ error: 'files/manifest length mismatch' });
-
-  // 幂等：同 user+release_hash 已存在 → 只把 latest 指过去·返已有（不 409·不重写）
-  const existing = db.prepare('SELECT id FROM vault_releases WHERE user_id = ? AND release_hash = ?').get(userId, manifest.release_hash);
-  if (existing) {
-    db.prepare("INSERT INTO vault_latest(user_id, release_id, updated_at) VALUES(?, ?, datetime('now')) ON CONFLICT(user_id) DO UPDATE SET release_id = excluded.release_id, updated_at = excluded.updated_at").run(userId, existing.id);
-    return res.json({ ok: true, release_id: existing.id, deduped: true });
+  let deviceId = ''; // 仅元数据
+  if (device_id !== undefined && device_id !== null && device_id !== '') {
+    deviceId = sanId(device_id);
+    if (!deviceId) return res.status(400).json({ error: 'bad device_id' }); // 别静默吞客户端 bug
   }
 
-  // 逐文件校验：path 合法 + manifest/files 同序同 path + 重算 sha256/bytes 对齐
+  if (!manifest || manifest.schema_version !== RELEASE_SCHEMA) return res.status(400).json({ error: `schema_version != ${RELEASE_SCHEMA}` });
+  const clientHash = normalizeReleaseHash(manifest.release_hash);
+  if (!clientHash) return res.status(400).json({ error: 'bad release_hash' });
+  if (!Array.isArray(manifest.files) || !Array.isArray(files) || manifest.files.length !== files.length) return res.status(400).json({ error: 'files/manifest length mismatch' });
+  if (files.length > MAX_FILES) return res.status(413).json({ error: `too many files (max ${MAX_FILES})` });
+
+  // 逐文件校验：path 合法 + 无重复 path + manifest/files 同序同 path + 重算 sha256/bytes 对齐
   const prepared = [];
+  const seenPaths = new Set();
   let totalBytes = 0;
   for (let i = 0; i < files.length; i++) {
     const mf = manifest.files[i];
@@ -86,6 +116,8 @@ router.post('/users/:userId/releases', (req, res) => {
     if (!mf || !ff || typeof ff.markdown !== 'string' || mf.path !== ff.path) return res.status(400).json({ error: `file[${i}] path/order mismatch` });
     const pathErr = validateVaultPath(mf.path);
     if (pathErr) return res.status(400).json({ error: `file[${i}] path ${pathErr}: ${mf.path}` });
+    if (seenPaths.has(mf.path)) return res.status(400).json({ error: `duplicate path: ${mf.path}` }); // 防 vault_release_files PK 冲突→永久失败+孤儿 blob
+    seenPaths.add(mf.path);
     const hex = sha256Hex(ff.markdown);
     const ch = `sha256:${hex}`;
     const bytes = Buffer.byteLength(ff.markdown, 'utf8');
@@ -94,12 +126,25 @@ router.post('/users/:userId/releases', (req, res) => {
     totalBytes += bytes;
   }
 
+  // 服务端复算 release_hash 并校验（防客户端给假 hash 致同 hash 不同内容被静默当旧 release）。
+  const releaseHash = computeReleaseHash(prepared);
+  if (clientHash !== releaseHash) return res.status(400).json({ error: 'release_hash mismatch' });
+  const storedManifest = { ...manifest, release_hash: releaseHash };
+
+  // 幂等：同 user+复算 hash 已存在 → 只把 latest 指过去·返已有（不 409·不重写）
+  const existing = db.prepare('SELECT id FROM vault_releases WHERE user_id = ? AND release_hash = ?').get(userId, releaseHash);
+  if (existing) {
+    db.prepare("INSERT INTO vault_latest(user_id, release_id, updated_at) VALUES(?, ?, datetime('now')) ON CONFLICT(user_id) DO UPDATE SET release_id = excluded.release_id, updated_at = excluded.updated_at").run(userId, existing.id);
+    return res.json({ ok: true, release_id: existing.id, deduped: true });
+  }
+
   // 先把所有 blob 落盘（原子·内容寻址），再开 DB 事务记录（全落盘后才提交·避免 latest 指向缺 blob）
   let written;
   try {
     written = prepared.map((b) => ({ ...b, disk_path: writeBlobAtomic(userId, b.hex, b.markdown) }));
   } catch (e) {
-    return res.status(500).json({ error: `blob write failed: ${e.message}` });
+    console.error('[inkloop-vault/blob]', e);
+    return res.status(500).json({ error: 'blob write failed' });
   }
 
   const releaseId = crypto.randomUUID();
@@ -108,7 +153,7 @@ router.post('/users/:userId/releases', (req, res) => {
   const insBlob = db.prepare('INSERT INTO vault_blobs(user_id, content_hash, bytes, disk_path) VALUES(?,?,?,?) ON CONFLICT(user_id, content_hash) DO NOTHING');
   const setLatest = db.prepare("INSERT INTO vault_latest(user_id, release_id, updated_at) VALUES(?, ?, datetime('now')) ON CONFLICT(user_id) DO UPDATE SET release_id = excluded.release_id, updated_at = excluded.updated_at");
   const txn = db.transaction(() => {
-    insRelease.run(releaseId, userId, deviceId, manifest.release_hash, manifest.schema_version, String(manifest.app_version || ''), String(manifest.generated_at || ''), JSON.stringify(manifest), written.length, totalBytes);
+    insRelease.run(releaseId, userId, deviceId, releaseHash, manifest.schema_version, String(manifest.app_version || ''), String(manifest.generated_at || ''), JSON.stringify(storedManifest), written.length, totalBytes);
     written.forEach((b, i) => {
       insFile.run(releaseId, i, b.path, b.content_hash, b.bytes);
       insBlob.run(userId, b.content_hash, b.bytes, b.disk_path);
@@ -118,7 +163,12 @@ router.post('/users/:userId/releases', (req, res) => {
   try {
     txn();
   } catch (e) {
-    return res.status(500).json({ error: `db txn failed: ${e.message}` });
+    if (isReleaseHashConflict(e)) { // 并发同 release_hash 竞态 → 已有那条胜·指 latest 返已有（非 500）
+      const raced = db.prepare('SELECT id FROM vault_releases WHERE user_id = ? AND release_hash = ?').get(userId, releaseHash);
+      if (raced) { setLatest.run(userId, raced.id); return res.json({ ok: true, release_id: raced.id, deduped: true }); }
+    }
+    console.error('[inkloop-vault/db]', e);
+    return res.status(500).json({ error: 'db txn failed' });
   }
   res.json({ ok: true, release_id: releaseId, file_count: written.length, total_bytes: totalBytes });
 });
@@ -149,7 +199,8 @@ router.get('/users/:userId/blobs/sha256/:hex', (req, res) => {
   const blob = db.prepare('SELECT disk_path FROM vault_blobs WHERE user_id = ? AND content_hash = ?').get(userId, `sha256:${hex}`);
   if (!blob) return res.status(404).json({ error: 'not found' });
   const abs = resolve(VAULT_DIR, blob.disk_path);
-  if (!abs.startsWith(VAULT_DIR + '/') || !existsSync(abs)) return res.status(503).json({ error: 'blob missing' }); // 防越界 + 盘上缺失
+  const diskRel = relative(VAULT_DIR, abs);
+  if (diskRel.startsWith('..') || isAbsolute(diskRel) || !existsSync(abs)) return res.status(503).json({ error: 'blob missing' }); // 防越界（relative 兜底）+ 盘上缺失
   res.set('ETag', `"${hex}"`);
   res.type('text/markdown; charset=utf-8');
   res.sendFile(abs);
