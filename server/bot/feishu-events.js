@@ -315,11 +315,12 @@ function normMinuteKey(s) { return String(s || '').toLowerCase().replace(/\s+/g,
 // 注入「绑定后总结」回调（避免 feishu-events ↔ meeting-workflow 循环依赖）。index.js 启动时设。
 export function setAutoMinuteSummarizer(fn) { _autoMinuteSummarizer = typeof fn === 'function' ? fn : null; }
 
-// 对一条会议：搜「我的妙记」(query=topic) → owner+时间窗+标题匹配 → 绑定。返回 { meeting, openId, token } 或 null。
+// 对一条会议：搜「我的妙记」(query=topic) → owner+时间窗+标题匹配 → 绑定。
+// 返回 { meeting, openId, token, alreadyBound? } 或 null（未绑·留下次重试/人工）。
 export async function autoBindMinuteForMeeting(meetingId) {
   const m = db.prepare('SELECT * FROM feishu_meetings WHERE meeting_id=?').get(meetingId);
   if (!m) return null;
-  if (m.bound_minute_token) return getMeeting(meetingId); // 已绑（人肉/上轮自动）
+  if (m.bound_minute_token) return { meeting: getMeeting(meetingId), openId: m.bound_minute_by || null, token: m.bound_minute_token, alreadyBound: true };
   const topic = m.topic;
   const startMs = Number(m.start_time) || 0;
   if (!topic || !startMs) return null; // 没标题/没开始时间 → 搜不了（飞书自动命名通常有「X的视频会议」）
@@ -327,31 +328,49 @@ export async function autoBindMinuteForMeeting(meetingId) {
   const winLo = startMs - AUTO_MINUTE_BEFORE_MS;
   const winHi = endMs + AUTO_MINUTE_AFTER_MS;
   const topicKey = normMinuteKey(topic);
-  // 候选授权人：会议 owner 优先（只有 owner 能读自己妙记 transcript），再唯一授权人，再全部已授权。
-  const openIds = [...new Set([m.owner_open_id, soleAuthorizedOpenId(), ...listAuthorized().filter((x) => !x.reauth_required).map((x) => x.open_id)].filter(Boolean))];
+  // 候选授权人：会议 owner 已知 → 只用 owner（且必须已授权·否则这场妙记没人有权读 transcript·返回空不乱试）；
+  // owner 未知 → 唯一授权人/全部已授权。绝不拿「别人的同名妙记」误绑（#3）。
+  const authorized = listAuthorized().filter((x) => !x.reauth_required).map((x) => String(x.open_id));
+  const ownerOpenId = m.owner_open_id ? String(m.owner_open_id) : null;
+  const openIds = ownerOpenId
+    ? (authorized.includes(ownerOpenId) ? [ownerOpenId] : [])
+    : [...new Set([soleAuthorizedOpenId(), ...authorized].filter(Boolean).map(String))];
   for (const openId of openIds) {
     let res;
-    try { res = await searchMinutes(openId, { query: topic, startTime: Math.floor(winLo / 1000), endTime: Math.floor(winHi / 1000), pageSize: 20 }); }
+    try { res = await searchMinutes(openId, { query: topic, pageSize: 20 }); } // 不传 time_range：单位不确定·时间过滤靠 create_time（#2）
     catch (e) { console.warn(`[feishu-events] autoMinute search meeting=${meetingId} open=${openId}: ${e.message}`); continue; }
     const hits = [];
+    let transientErr = null;
     for (const it of res.items || []) {
       const token = it?.token;
       if (!token || !/^[A-Za-z0-9_-]+$/.test(token)) continue;
-      let minute; try { minute = (await getMinute(token, openId))?.minute; } catch { continue; }
-      if (!minute || minute.owner_id !== openId) continue;           // 只绑 owner==授权人（能读 transcript）
+      let minute;
+      try { minute = (await getMinute(token, openId))?.minute; }
+      catch (e) {
+        const code = Number(e?.feishuCode);
+        if (code === 403 || code === 404) continue;   // 无权/不存在：这条真跳过
+        transientErr = e; break;                       // 瞬时/未知错（429/5xx/网络）：放弃本授权人本轮·别因抖动改绑次优（#5）
+      }
+      if (!minute) continue;
+      if (String(minute.owner_id) !== String(openId)) continue;             // owner==授权人（能读 transcript）
+      if (ownerOpenId && String(minute.owner_id) !== ownerOpenId) continue; // 且必须是会议 owner 本人的妙记（#3）
       const created = Number(minute.create_time) || 0;
-      if (!created || created < winLo || created > winHi) continue;   // 时间窗：排除同名旧会议
+      if (!created || created < winLo || created > winHi) continue;          // 时间窗：排除同名旧会议
       const titleKey = normMinuteKey(minute.title);
       const titleScore = titleKey ? (titleKey === topicKey ? 2 : (titleKey.includes(topicKey) || topicKey.includes(titleKey)) ? 1 : 0) : 0;
       hits.push({ token, title: minute.title, url: minute.url, created, titleScore });
     }
+    if (transientErr) { console.warn(`[feishu-events] autoMinute minute.get meeting=${meetingId} open=${openId}: ${transientErr.message}`); continue; }
     if (!hits.length) continue;
     hits.sort((a, b) => b.titleScore - a.titleScore || Math.abs(a.created - endMs) - Math.abs(b.created - endMs));
     const best = hits[0];
-    // 多条同分且都不沾标题 → 不确定，本轮跳过（留下次重试 / 人工 bind），不赌一个可能错的。
-    if (hits.length > 1 && hits[1].titleScore === best.titleScore && best.titleScore === 0) {
-      console.warn(`[feishu-events] autoMinute meeting=${meetingId} 多条同分无标题匹配·本轮跳过`); continue;
+    // 最高分有多条并列 → 歧义，本轮不赌（#4·飞书同名会议「X的视频会议」太多·宁可留下次重试/人工 bind）。
+    if (hits.filter((h) => h.titleScore === best.titleScore).length > 1) {
+      console.warn(`[feishu-events] autoMinute meeting=${meetingId} 多条同分候选·跳过避免误绑`); continue;
     }
+    // 绑定前再读一次，避免与并发 timer / 人肉转发卡片互相覆盖（#6）。
+    const cur = db.prepare('SELECT bound_minute_token, bound_minute_by FROM feishu_meetings WHERE meeting_id=?').get(meetingId);
+    if (cur?.bound_minute_token) return { meeting: getMeeting(meetingId), openId: cur.bound_minute_by || openId, token: cur.bound_minute_token, alreadyBound: true };
     // 落 minute_cards（让 serializeMeeting 能给 minute_url），再绑定（bindMinuteToMeeting 会发 minute_bound + 补 summary_ready）。
     db.prepare(`
       INSERT INTO feishu_minute_cards (minute_token, minute_url, topic, chat_id, received_at)
@@ -365,27 +384,57 @@ export async function autoBindMinuteForMeeting(meetingId) {
   return null;
 }
 
-// 会议结束后排期：延迟多次重试自动发现（妙记会后几分钟才生成·实测 7min 还没好）。绑定成功 → 触发总结落库（设备拉）。
+const _autoMinuteRunning = new Set();
+function clearAutoMinuteTimers(meetingId) {
+  for (const t of _autoMinuteTimers.get(meetingId) || []) clearTimeout(t);
+  _autoMinuteTimers.delete(meetingId);
+}
+
+// 会议结束后排期：延迟多次重试自动发现（妙记会后几分钟才生成·实测 7min 还没好）。
+// 单会议串行（防并发覆盖）·绑定+总结成功才清 timer·没命中跑完清 Map 防泄漏（#6）。
 export function queueAutoMinuteDiscoveryForMeeting(ev) {
   if (process.env.FEISHU_AUTO_MINUTE_DISCOVERY === 'false') return;
   const meetingId = ev?.meeting?.id;
   if (!meetingId) return;
-  for (const t of _autoMinuteTimers.get(meetingId) || []) clearTimeout(t);
+  clearAutoMinuteTimers(meetingId);
+  let remaining = AUTO_MINUTE_DELAYS.length;
   const timers = AUTO_MINUTE_DELAYS.map((delay) => setTimeout(async () => {
-    let bound = null;
-    try { bound = await autoBindMinuteForMeeting(meetingId); }
-    catch (e) { console.warn(`[feishu-events] autoMinute tick meeting=${meetingId}: ${e.message}`); }
-    if (bound?.token) {
-      for (const t of _autoMinuteTimers.get(meetingId) || []) clearTimeout(t);
-      _autoMinuteTimers.delete(meetingId);
-      if (_autoMinuteSummarizer) {
-        try { await _autoMinuteSummarizer(meetingId, bound.openId); }
-        catch (e) { console.warn(`[feishu-events] autoMinute 总结 meeting=${meetingId}: ${e.message}`); }
+    if (_autoMinuteRunning.has(meetingId)) return; // 上个 delay 还在跑：本次跳过，防两个 tick 并发绑定
+    _autoMinuteRunning.add(meetingId);
+    let done = false;
+    try {
+      let bound = null;
+      try { bound = await autoBindMinuteForMeeting(meetingId); }
+      catch (e) { console.warn(`[feishu-events] autoMinute tick meeting=${meetingId}: ${e.message}`); }
+      if (bound?.token) {
+        if (_autoMinuteSummarizer && !bound.alreadyBound) {
+          // 总结成功才算 done；失败（transcript 可能还没 ready）保留后续 delay 重试。
+          try { await _autoMinuteSummarizer(meetingId, bound.openId); done = true; }
+          catch (e) { console.warn(`[feishu-events] autoMinute 总结 meeting=${meetingId}: ${e.message}`); }
+        } else {
+          done = true; // 已绑（人肉/上轮）或无 summarizer：发现任务到此完成
+        }
       }
+    } finally {
+      _autoMinuteRunning.delete(meetingId);
+      remaining -= 1;
+      if (done) clearAutoMinuteTimers(meetingId);
+      else if (remaining <= 0 && _autoMinuteTimers.get(meetingId) === timers) _autoMinuteTimers.delete(meetingId);
     }
   }, delay));
   for (const t of timers) t.unref?.();
   _autoMinuteTimers.set(meetingId, timers);
+}
+
+// 进程重启会丢内存里 pending 的 setTimeout → 启动时补扫最近已结束、未绑定的会议重排队（#8·生产正确性）。
+export function recoverAutoMinuteDiscovery() {
+  if (process.env.FEISHU_AUTO_MINUTE_DISCOVERY === 'false') return;
+  const lookbackMs = Number(process.env.FEISHU_AUTO_MINUTE_RECOVERY_LOOKBACK_MS) || 12 * 60 * 60 * 1000;
+  try {
+    const rows = db.prepare('SELECT meeting_id FROM feishu_meetings WHERE end_time IS NOT NULL AND bound_minute_token IS NULL AND end_time >= ?').all(Date.now() - lookbackMs);
+    for (const r of rows) queueAutoMinuteDiscoveryForMeeting({ meeting: { id: r.meeting_id } });
+    if (rows.length) console.log(`[feishu-events] autoMinute 启动补扫 ${rows.length} 场未绑定会议`);
+  } catch (e) { console.warn('[feishu-events] recoverAutoMinuteDiscovery:', e.message); }
 }
 
 // 给一条会议挂上妙记：显式绑定优先；topic/时间窗只标 heuristic，并把 match 元信息透给 InkLoop。

@@ -49,7 +49,7 @@ import { MarkupStream } from './markup-parser.js';
 import { renderMarkup } from './markup-renderers.js';
 import { getUserByUsername } from '../mcp/db-ops.js';
 import { parseMeetingSummaryCommand, summarizeAndSendMeeting, summarizeMeetingEndedEvent, summarizeAndPersistMeeting } from './meeting-workflow.js';
-import { setAutoMinuteSummarizer } from './feishu-events.js';
+import { setAutoMinuteSummarizer, getMeetingSummaryForMeeting, recoverAutoMinuteDiscovery } from './feishu-events.js';
 import {
   buildIconProbeCard,
   buildColorProbeCard,
@@ -81,9 +81,19 @@ export async function startBot() {
   startSessionCleanup();
 
   // 妙记自动发现绑定后的总结回调（注入避免 feishu-events ↔ meeting-workflow 循环依赖）→ 落库供设备 GET。
-  setAutoMinuteSummarizer((meetingId, openId) => summarizeAndPersistMeeting({ meetingId, requesterOpenId: openId }));
+  // in-flight + 缓存 guard：和旧 BOT_MEETING_SUMMARY_AUTO 路径共用「已 ready 就不再烧」，避免一场会双烧模型（#7）。
+  const autoSummaryJobs = new Map();
+  const summarizeAndPersistMeetingOnce = (meetingId, openId) => {
+    if (getMeetingSummaryForMeeting(meetingId).status === 'ready') return Promise.resolve();
+    if (!autoSummaryJobs.has(meetingId)) {
+      autoSummaryJobs.set(meetingId, summarizeAndPersistMeeting({ meetingId, requesterOpenId: openId }).finally(() => autoSummaryJobs.delete(meetingId)));
+    }
+    return autoSummaryJobs.get(meetingId);
+  };
+  setAutoMinuteSummarizer((meetingId, openId) => summarizeAndPersistMeetingOnce(meetingId, openId));
 
   const feishuReady = await initFeishu(handleMessage, { onMeetingEnded: handleMeetingEnded });
+  recoverAutoMinuteDiscovery(); // 重启补扫内存里丢失的 pending 自动发现（#8）
 
   startPatrol();
   startHookScheduler();
@@ -858,6 +868,7 @@ async function handleMeetingEnded(data) {
   if (old) clearTimeout(old); // 同一会议事件重投 → 只留最后一个 timer，不重复烧模型/刷卡
   const timer = setTimeout(() => {
     pendingMeetingSummaryTimers.delete(meetingId);
+    if (getMeetingSummaryForMeeting(meetingId).status === 'ready') return; // 已被妙记自动发现总结过 → 不重复烧模型/刷卡（#7）
     summarizeMeetingEndedEvent(data).catch((err) => console.warn('[Bot/MeetingSummary] auto failed:', err.message));
   }, delayMs);
   pendingMeetingSummaryTimers.set(meetingId, timer);
