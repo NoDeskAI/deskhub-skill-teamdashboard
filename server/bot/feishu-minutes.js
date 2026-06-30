@@ -280,6 +280,33 @@ export async function getTranscript(minuteToken, openId, fileFormat = 'srt') {
   } catch (e) { throw normalizeFeishuError('transcript', e); }
 }
 
+// 搜「我的妙记」（user_access_token）。⚠️实测：**必须带 query 关键词·空 query 返空·`keyword` 字段无效**。
+// body={query, page_size, start_time/end_time(秒字符串)}；返回 { items:[{token, display_info, meta_data}], has_more, page_token }。
+// SDK 未封装该端点 → raw fetch（与 transcript 同样走 user_access_token）。
+export async function searchMinutes(openId, { query, startTime, endTime, pageSize = 20 } = {}) {
+  const q = String(query || '').trim();
+  if (!q) return { items: [], has_more: false };
+  const uat = await getFreshUserAccessToken(openId);
+  const body = { query: q, page_size: Math.min(Math.max(Number(pageSize) || 20, 1), 100) };
+  if (startTime) body.start_time = String(startTime);
+  if (endTime) body.end_time = String(endTime);
+  let resp, text;
+  try {
+    resp = await fetch('https://open.feishu.cn/open-apis/minutes/v1/minutes/search', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${uat}`, 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(body),
+    });
+    text = await resp.text();
+  } catch (e) { throw normalizeFeishuError('minutes.search', e); }
+  let json; try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
+  if (!resp.ok || (json.code != null && json.code !== 0)) {
+    throw normalizeFeishuError('minutes.search', { response: { status: resp.status, data: json } });
+  }
+  const data = json.data || {};
+  return { items: Array.isArray(data.items) ? data.items : [], has_more: !!data.has_more, page_token: data.page_token };
+}
+
 // ── 续期 daemon：定期刷临期 token（防 idle 期间 refresh_token 自然过期）──
 let _daemon = null;
 export function startTokenRefreshDaemon(intervalMs = 30 * 60 * 1000) {

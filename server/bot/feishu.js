@@ -102,6 +102,7 @@ export async function initFeishu(onMessage, handlers = {}) {
     },
     'vc.meeting.all_meeting_ended_v1': async (data) => {
       recordMeetingEnded(data);
+      queueAutoMinuteDiscoveryForMeeting(data); // 自动从「我的妙记」搜+绑定+总结（延迟重试·等妙记生成·干掉人肉转发）
       console.log(`[Bot/Feishu] WS2 会议结束 id=${data?.meeting?.id}`);
       if (onMeetingEnded) {
         try { await onMeetingEnded(data); } catch (err) { console.warn('[Bot/Feishu] onMeetingEnded 错误:', err.message); }

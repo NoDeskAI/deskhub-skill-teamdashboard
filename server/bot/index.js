@@ -48,7 +48,8 @@ import { summarizeThinking } from './summary-model.js';
 import { MarkupStream } from './markup-parser.js';
 import { renderMarkup } from './markup-renderers.js';
 import { getUserByUsername } from '../mcp/db-ops.js';
-import { parseMeetingSummaryCommand, summarizeAndSendMeeting, summarizeMeetingEndedEvent } from './meeting-workflow.js';
+import { parseMeetingSummaryCommand, summarizeAndSendMeeting, summarizeMeetingEndedEvent, summarizeAndPersistMeeting } from './meeting-workflow.js';
+import { setAutoMinuteSummarizer } from './feishu-events.js';
 import {
   buildIconProbeCard,
   buildColorProbeCard,
@@ -78,6 +79,9 @@ export async function startBot() {
   console.log(`[Bot] chatMaxRounds=${chatRounds} notifyMaxRounds=${notifyRounds} toolTimeoutMs=${toolTimeout} sessionTtlMin=${sessionTtl/60000} distillMaxRounds=${distillRounds}`);
 
   startSessionCleanup();
+
+  // 妙记自动发现绑定后的总结回调（注入避免 feishu-events ↔ meeting-workflow 循环依赖）→ 落库供设备 GET。
+  setAutoMinuteSummarizer((meetingId, openId) => summarizeAndPersistMeeting({ meetingId, requesterOpenId: openId }));
 
   const feishuReady = await initFeishu(handleMessage, { onMeetingEnded: handleMeetingEnded });
 
